@@ -3,54 +3,62 @@ import requests
 from requests.auth import HTTPBasicAuth
 import google.generativeai as genai
 
-# 1. 환경 변수 로드 (공백 없이 깨끗하게 처리)
+# 환경 변수 로드
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
+UNSPLASH_KEY = os.environ.get('UNSPLASH_ACCESS_KEY')
 WP_USER = os.environ.get('WP_USER')
 WP_PASS = os.environ.get('WP_PASS')
 WP_URL = "https://reloaditem.com/wp-json/wp/v2/posts"
 
-# 2. Gemini 설정
+# Gemini 설정
 genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-def get_gemini_content():
+def get_unsplash_image(query):
+    """Unsplash에서 검색어에 맞는 이미지 URL을 가져옵니다."""
     try:
-        # AI에게 시킬 명령어
-        prompt = "워드프레스 블로그에 올릴 유익한 IT 트렌드나 자기계발 정보 글을 하나 작성해줘. 첫 줄은 '제목: [제목]' 형식으로 쓰고 그 다음 줄부터 본문을 작성해줘. 한국어로 아주 정성스럽게 작성해."
-        response = model.generate_content(prompt)
-        full_text = response.text
-        
-        # 제목과 본문 분리 로직
-        lines = full_text.strip().split('\n')
-        title = lines[0].replace("제목:", "").replace("**제목:**", "").strip()
-        content = "\n".join(lines[1:]).strip()
-        
-        if not title:
-            title = "오늘의 새로운 소식"
-            
-        return title, content
-    except Exception as e:
-        print(f"AI 글 생성 중 오류: {e}")
-        return "제목 없음", "본문 생성 실패"
+        url = f"https://api.unsplash.com/search/photos?query={query}&client_id={UNSPLASH_KEY}&per_page=1"
+        res = requests.get(url)
+        if res.status_code == 200:
+            data = res.json()
+            if data['results']:
+                return data['results'][0]['urls']['regular']
+        return None
+    except:
+        return None
+
+def get_gemini_content():
+    prompt = """
+    너는 한국의 육아대디 블로거야. '육아는 템빨' 주제로 포스팅을 작성해줘.
+    형식:
+    1. 첫 줄은 '제목: [제목]'
+    2. 두 번째 줄은 '검색어: [이미지 검색용 영어 키워드 하나]' (예: baby stroller, baby bottle)
+    3. 그 다음부터는 본문을 작성해줘. 본문 중간에 [IMAGE] 라는 문구를 꼭 한 번 넣어줘.
+    """
+    response = model.generate_content(prompt)
+    full_text = response.text
+    lines = full_text.strip().split('\n')
+    
+    title = lines[0].replace("제목:", "").strip()
+    search_query = lines[1].replace("검색어:", "").strip()
+    content_body = "\n".join(lines[2:]).strip()
+    
+    # 이미지 가져오기 및 삽입
+    image_url = get_unsplash_image(search_query)
+    if image_url:
+        img_tag = f'<img src="{image_url}" alt="{search_query}" style="width:100%; height:auto;">'
+        content_body = content_body.replace("[IMAGE]", img_tag)
+    
+    return title, content_body
 
 def post_to_wp():
     title, content = get_gemini_content()
-    
-    # 워드프레스 전송 데이터
-    payload = {
-        "title": title,
-        "content": content,
-        "status": "draft"
-    }
-    
-    # 실제 전송
+    payload = {"title": title, "content": content, "status": "draft"}
     res = requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_PASS), json=payload)
-    
     if res.status_code == 201:
-        print(f"✅ 포스팅 성공: {title}")
+        print(f"✅ 성공: {title}")
     else:
-        print(f"❌ 실패 코드: {res.status_code}")
-        print(f"상세 내용: {res.text}")
+        print(f"❌ 실패: {res.status_code}")
 
 if __name__ == "__main__":
     post_to_wp()
