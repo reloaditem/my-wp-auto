@@ -4,7 +4,7 @@ from requests.auth import HTTPBasicAuth
 import google.generativeai as genai
 
 # 1. 깃허브 Secrets에 저장한 이름과 똑같아야 합니다!
-GEMINI_KEY = os.environ.get('GEMINI_API_KEY') 
+GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 WP_USER = os.environ.get('WP_USER')
 WP_PASS = os.environ.get('WP_PASS')
 WP_URL = "https://reloaditem.com/wp-json/wp/v2/posts"
