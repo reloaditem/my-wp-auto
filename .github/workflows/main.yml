@@ -27,7 +27,7 @@ jobs:
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
+        run: python ./main.py
           # 현재 어떤 파일들이 있는지 확인 (에러 방지용 로그)
           ls -R
           # 현재 위치(./)에 있는 main.py를 실행
