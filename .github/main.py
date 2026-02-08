@@ -28,21 +28,19 @@ def get_unsplash_image(query):
 
 def get_gemini_content():
     try:
-        # 모델 설정 (경로를 포함한 정석 명칭 사용)
-        model = genai.GenerativeModel('models/gemini-1.5-flash')
+        # 모델 설정 (가장 안정적인 기본 호출 방식)
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # 영문 포스팅을 위한 강력한 지시
+        # 영문 포스팅을 위한 명확한 지시
         prompt = """
-        Write a high-quality blog post strictly in ENGLISH.
-        Topic: "Must-have Items for a Smart Parenting Daddy"
+        Write a professional blog post STRICTLY IN ENGLISH.
+        Topic: "Smart Parenting: Essential Gadgets for Modern Dads"
         
-        Guidelines:
-        1. Language: English Only.
-        2. Format:
-           - Line 1: Title: [Your English Title]
-           - Line 2: SearchTerm: [English keyword for image]
-           - Body: Detailed post with subheadings and emojis.
-        3. Insert the tag [IMAGE] in the middle of the content.
+        Format:
+        1. Title: [Your English Title]
+        2. SearchTerm: [English keyword for image]
+        3. Body: Comprehensive blog content with emojis and subheadings in English.
+        4. Place the tag [IMAGE] in the middle of the post.
         """
         
         response = model.generate_content(prompt)
@@ -70,14 +68,14 @@ def get_gemini_content():
         return title, content_body.replace("\n", "<br>")
 
     except Exception as e:
-        return "Post Error", f"Details: {str(e)}"
+        return "Post Generation Error", f"Details: {str(e)}"
 
 def post_to_wp():
     title, content = get_gemini_content()
     payload = {"title": title, "content": content, "status": "draft"}
     res = requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_PASS), json=payload)
     if res.status_code == 201:
-        print(f"✅ Success: {title}")
+        print(f"✅ Successfully Posted: {title}")
     else:
         print(f"❌ Failed: {res.status_code}")
 
