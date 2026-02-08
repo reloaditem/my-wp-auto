@@ -1,30 +1,33 @@
-name: Hourly Auto Post
+name: Auto Blog Post
 
 on:
   schedule:
-    - cron: '0 6,12,21 * * *'
-  workflow_dispatch:
+    # 한국 시간(KST) 기준으로 설정 (UTC 기준이라 9시간 차이)
+    # 아래 설정은 한국 시간 기준 매일 오전 9시, 오후 3시, 오후 9시에 실행됩니다.
+    - cron: '0 0,6,12 * * *'
+  workflow_dispatch: # 수동으로 실행 버튼을 누를 때도 작동함
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.9'
 
       - name: Install dependencies
         run: |
-          pip install openai requests
+          pip install requests openai
 
-      - name: Run Auto Script
+      - name: Run script
         env:
-          WP_USER: ${{ secrets.WP_USER }}
-          WP_PASS: ${{ secrets.WP_PASS }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASS: ${{ secrets.WP_PASS }}
         run: python main.py
