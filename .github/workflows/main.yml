@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests google-generativeai
       - name: Run Auto Script
         env:
           WP_USER: ${{ secrets.WP_USER }}
