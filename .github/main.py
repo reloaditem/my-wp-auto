@@ -7,7 +7,7 @@ import json
 WP_USER = os.environ.get('WP_USER')
 WP_PASS = os.environ.get('WP_PASS')
 # URL 끝에 슬래시(/) 유무를 확인하기 위해 직접 체크
-WP_URL = "https://reloaditem.com/wp-json/wp/v2/posts"
+WP_URL = "https://reloaditem.com/wp-json/wp/v2/posts/"
 
 def debug_post():
     print(f"📡 진단 시작: {WP_URL} 접속 시도 중...")
