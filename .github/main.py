@@ -10,8 +10,9 @@ WP_USER = os.environ.get('WP_USER')
 WP_PASS = os.environ.get('WP_PASS')
 WP_URL = "https://reloaditem.com/wp-json/wp/v2/posts"
 
-# Gemini 설정
+# 1. Gemini 설정 (가장 단순한 기본형)
 genai.configure(api_key=GEMINI_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 def get_unsplash_image(query):
     if not UNSPLASH_KEY:
@@ -28,24 +29,22 @@ def get_unsplash_image(query):
 
 def get_gemini_content():
     try:
-        # 모델 설정 (가장 안정적인 기본 호출 방식)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
         # 영문 포스팅을 위한 명확한 지시
         prompt = """
         Write a professional blog post STRICTLY IN ENGLISH.
-        Topic: "Smart Parenting: Essential Gadgets for Modern Dads"
+        Topic: "Modern Parenting: The Best Gadgets for Hands-on Dads"
         
         Format:
-        1. Title: [Your English Title]
-        2. SearchTerm: [English keyword for image]
+        1. Title: [Engaging English Title]
+        2. SearchTerm: [One English keyword for image]
         3. Body: Comprehensive blog content with emojis and subheadings in English.
-        4. Place the tag [IMAGE] in the middle of the post.
+        4. Include the tag [IMAGE] in the middle of the body.
         """
         
         response = model.generate_content(prompt)
         full_text = response.text.strip()
         
+        # 텍스트 분리 로직
         lines = full_text.split('\n')
         title = lines[0].replace("Title:", "").replace("**", "").strip()
         
@@ -68,14 +67,20 @@ def get_gemini_content():
         return title, content_body.replace("\n", "<br>")
 
     except Exception as e:
-        return "Post Generation Error", f"Details: {str(e)}"
+        # 워드프레스 제목에 에러가 찍히게 하여 추적 용이하게 함
+        return "Post Creation Error", f"Technical Details: {str(e)}"
 
 def post_to_wp():
     title, content = get_gemini_content()
-    payload = {"title": title, "content": content, "status": "draft"}
+    payload = {
+        "title": title, 
+        "content": content, 
+        "status": "draft" # 임시글로 저장
+    }
+    
     res = requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_PASS), json=payload)
     if res.status_code == 201:
-        print(f"✅ Successfully Posted: {title}")
+        print(f"✅ Posted Successfully: {title}")
     else:
         print(f"❌ Failed: {res.status_code}")
 
