@@ -10,9 +10,9 @@ WP_USER = os.environ.get('WP_USER')
 WP_PASS = os.environ.get('WP_PASS')
 WP_URL = "https://reloaditem.com/wp-json/wp/v2/posts"
 
-# Gemini 설정
+# Gemini 설정 (모델명을 latest로 변경하여 404 에러 해결)
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
 def get_unsplash_image(query):
     if not UNSPLASH_KEY: return None
@@ -29,71 +29,61 @@ def get_unsplash_image(query):
 def get_gemini_content():
     try:
         prompt = """
-        한국의 육아대디 블로거로서 '육아는 템빨' 주제로 글을 써줘.
-        1. 첫 줄은 무조건 '제목: [제목]' 형식으로 써줘.
-        2. 두 번째 줄은 무조건 '검색어: [영어키워드]' 형식으로 써줘.
-        3. 그 다음 줄부터 본문을 아주 길고 정성스럽게 써줘. 
-        4. 본문 중간에 [IMAGE] 라는 글자를 꼭 넣어줘.
+        너는 한국의 베테랑 '육아대디' 블로거야. '육아는 템빨' 주제로 정성스러운 포스팅을 작성해줘.
+        형식 가이드:
+        1. 첫 줄은 '제목: [흥미로운 제목]'
+        2. 두 번째 줄은 '검색어: [이미지 영어 키워드]' (예: baby nursery)
+        3. 세 번째 줄부터는 본문을 아주 길고 유익하게 써줘. (소제목, 이모지 활용)
+        4. 본문 중간에 반드시 [IMAGE] 문구를 넣어줘.
         """
         response = model.generate_content(prompt)
         full_text = response.text.strip()
         
+        # 텍스트가 비어있는지 확인
+        if not full_text:
+            return "육아대디의 장비빨 일기", "AI 응답이 비어있습니다."
+
         lines = full_text.split('\n')
-        
-        # 1. 제목 추출 (첫 줄에 '제목:'이 없어도 첫 줄을 제목으로 사용)
         title = lines[0].replace("제목:", "").replace("**", "").strip()
         
-        # 2. 검색어 추출 및 본문 시작 위치 찾기
         search_query = "baby"
-        content_start_idx = 1
-        
         if len(lines) > 1 and "검색어:" in lines[1]:
             search_query = lines[1].replace("검색어:", "").replace("**", "").strip()
-            content_start_idx = 2
-        
-        # 3. 본문 합치기 (본문이 비어있지 않게 보장)
-        content_body = "\n".join(lines[content_start_idx:]).strip()
-        
-        # 만약 본문이 너무 짧으면 전체 텍스트를 그냥 본문으로 사용 (안전장치)
-        if len(content_body) < 10:
-            content_body = full_text
+            content_body = "\n".join(lines[2:]).strip()
+        else:
+            content_body = "\n".join(lines[1:]).strip()
 
-        # 4. 이미지 처리
+        # 이미지가 없을 경우 대비 안전장치
         image_url = get_unsplash_image(search_query)
         if image_url:
-            img_tag = f'<img src="{image_url}" alt="{search_query}" style="width:100%; max-width:600px; height:auto; display:block; margin:20px auto;">'
+            img_tag = f'<div style="text-align:center;"><img src="{image_url}" style="width:100%; max-width:600px; border-radius:10px; margin:20px 0;"></div>'
             if "[IMAGE]" in content_body:
                 content_body = content_body.replace("[IMAGE]", img_tag)
             else:
-                content_body = img_tag + "\n\n" + content_body
+                content_body = img_tag + "<br><br>" + content_body
         
-        # 워드프레스 개행(줄바꿈) 처리
+        # 줄바꿈을 HTML 태그로 변환 (워드프레스 가독성)
         content_body = content_body.replace("\n", "<br>")
         
         return title, content_body
+
     except Exception as e:
-        print(f"오류 발생: {e}")
-        return "육아대디의 장비빨 일상", f"글 생성 중 오류가 발생했습니다: {e}"
+        return "육아대디의 장비빨 일상", f"에러 발생: {str(e)}"
 
 def post_to_wp():
     title, content = get_gemini_content()
     
-    # 전송 데이터 로그 확인 (에러 추적용)
-    print(f"--- 전송될 제목: {title}")
-    print(f"--- 본문 길이: {len(content)} 자")
-
     payload = {
         "title": title,
-        "content": content, # HTML 형식을 지원하기 위해 'content' 필드 사용
+        "content": content,
         "status": "draft"
     }
     
     res = requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_PASS), json=payload)
     if res.status_code == 201:
-        print(f"✅ 성공: {title}")
+        print(f"✅ 포스팅 성공: {title}")
     else:
-        print(f"❌ 실패 코드: {res.status_code}")
-        print(f"응답: {res.text}")
+        print(f"❌ 실패 코드: {res.status_code}, 메시지: {res.text}")
 
 if __name__ == "__main__":
     post_to_wp()
