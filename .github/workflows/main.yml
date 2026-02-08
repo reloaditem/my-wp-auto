@@ -2,25 +2,33 @@ name: Hourly Auto Post
 
 on:
   schedule:
-    - cron: '0 6,12,21 * * *' # 한국 시간 6시, 15시, 21시
-  workflow_dispatch:
+    - cron: '0 6,12,21 * * *' # 한국 시간 기준 오전 6시, 오후 3시, 저녁 9시
+  workflow_dispatch: # 수동 실행 버튼
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.13'
+
       - name: Install dependencies
-        run: pip install requests google-generativeai # 여기서 제미나이 도구를 설치함!
-      - name: Run Script
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests google-generativeai
+
+      - name: Run Auto Script
         env:
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # 금고에서 키를 꺼내옴
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          ls -R  # 현재 폴더에 파일이 뭐가 있는지 로그에 찍어보기 (디버깅용)
-          python ./main.py  # ./ 를 붙여서 현재 위치에서 실행하도록 강제함
+          # 현재 어떤 파일들이 있는지 확인 (에러 방지용 로그)
+          ls -R
+          # 현재 위치(./)에 있는 main.py를 실행
+          python ./main.py
