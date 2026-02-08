@@ -21,4 +21,6 @@ jobs:
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # 금고에서 키를 꺼내옴
-        run: python main.py
+        run: |
+          ls -R  # 현재 폴더에 파일이 뭐가 있는지 로그에 찍어보기 (디버깅용)
+          python ./main.py  # ./ 를 붙여서 현재 위치에서 실행하도록 강제함
