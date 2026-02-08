@@ -10,41 +10,38 @@ WP_USER = os.environ.get('WP_USER')
 WP_PASS = os.environ.get('WP_PASS')
 WP_URL = "https://reloaditem.com/wp-json/wp/v2/posts"
 
-# 1. Gemini 설정 (가장 단순한 기본형)
+# 404 에러 방지를 위한 핵심 설정: 모델 이름을 경로와 함께 정확히 기재
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
 
 def get_unsplash_image(query):
-    if not UNSPLASH_KEY:
-        return None
+    if not UNSPLASH_KEY: return None
     try:
         url = f"https://api.unsplash.com/search/photos?query={query}&client_id={UNSPLASH_KEY}&per_page=1"
         res = requests.get(url, timeout=10)
         data = res.json()
-        if 'results' in data and len(data['results']) > 0:
-            return data['results'][0]['urls']['regular']
-        return None
-    except:
-        return None
+        return data['results'][0]['urls']['regular'] if data.get('results') else None
+    except: return None
 
 def get_gemini_content():
     try:
-        # 영문 포스팅을 위한 명확한 지시
+        # 정식 v1 API에서 작동하도록 모델 경로 지정
+        model = genai.GenerativeModel('models/gemini-1.5-flash')
+        
+        # 강력한 영문 포스팅 지시
         prompt = """
         Write a professional blog post STRICTLY IN ENGLISH.
-        Topic: "Modern Parenting: The Best Gadgets for Hands-on Dads"
+        Topic: "Smart Parenting: Essential Gadgets for Modern Dads"
         
         Format:
-        1. Title: [Engaging English Title]
+        1. Title: [Your English Title]
         2. SearchTerm: [One English keyword for image]
         3. Body: Comprehensive blog content with emojis and subheadings in English.
-        4. Include the tag [IMAGE] in the middle of the body.
+        4. Place the tag [IMAGE] in the middle of the post.
         """
         
         response = model.generate_content(prompt)
         full_text = response.text.strip()
         
-        # 텍스트 분리 로직
         lines = full_text.split('\n')
         title = lines[0].replace("Title:", "").replace("**", "").strip()
         
@@ -59,30 +56,19 @@ def get_gemini_content():
         image_url = get_unsplash_image(search_query)
         if image_url:
             img_tag = f'<div style="text-align:center; margin:20px 0;"><img src="{image_url}" style="width:100%; max-width:600px; border-radius:10px;"></div>'
-            if "[IMAGE]" in content_body:
-                content_body = content_body.replace("[IMAGE]", img_tag)
-            else:
-                content_body = img_tag + "<br><br>" + content_body
+            content_body = content_body.replace("[IMAGE]", img_tag) if "[IMAGE]" in content_body else img_tag + "<br>" + content_body
         
         return title, content_body.replace("\n", "<br>")
 
     except Exception as e:
-        # 워드프레스 제목에 에러가 찍히게 하여 추적 용이하게 함
-        return "Post Creation Error", f"Technical Details: {str(e)}"
+        # 에러 발생 시 워드프레스에 상세 에러를 찍어서 확인
+        return "⚠️ Technical Error Report", f"Error Detail: {str(e)}"
 
 def post_to_wp():
     title, content = get_gemini_content()
-    payload = {
-        "title": title, 
-        "content": content, 
-        "status": "draft" # 임시글로 저장
-    }
-    
+    payload = {"title": title, "content": content, "status": "draft"}
     res = requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_PASS), json=payload)
-    if res.status_code == 201:
-        print(f"✅ Posted Successfully: {title}")
-    else:
-        print(f"❌ Failed: {res.status_code}")
+    print(f"Post Result: {res.status_code}")
 
 if __name__ == "__main__":
     post_to_wp()
