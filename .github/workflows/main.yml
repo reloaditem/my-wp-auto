@@ -1,0 +1,23 @@
+name: Hourly Auto Post
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # 한국 시간 기준 오전 9시에 매일 실행 (수정 가능)
+  workflow_dispatch: # 우리가 수동으로 실행해볼 수 있는 버튼 생성
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        run: pip install requests
+      - name: Run Auto Script
+        env:
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASS: ${{ secrets.WP_PASS }}
+        run: python main.py
