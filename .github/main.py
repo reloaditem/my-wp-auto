@@ -14,85 +14,73 @@ WP_URL = "https://reloaditem.com/wp-json/wp/v2/posts/"
 
 client = OpenAI(api_key=OPENAI_KEY)
 
-def get_5_unique_images(keywords):
-    """한 포스팅 내에서 절대 중복되지 않는 5장의 사진을 가져옵니다."""
+def get_unique_images_by_keywords(keywords):
+    """지정된 5개 키워드로 각각 다른 사진을 검색합니다."""
     image_urls = []
-    session_used_ids = set() # 이번 포스팅에서 사용된 사진 ID 저장소
-    default_img = "https://images.unsplash.com/photo-1555252333-9f8e92e65df9"
+    used_ids = set()
     
-    # 5개의 키워드를 순회
-    for query in keywords[:5]:
+    for query in keywords:
         try:
-            # 1~100페이지 중 무작위 페이지 선택 (검색 결과의 다양성 확보)
-            random_page = random.randint(1, 100)
-            url = f"https://api.unsplash.com/search/photos?query={query.strip()}&client_id={UNSPLASH_KEY}&per_page=30&page={random_page}"
+            # 검색어 다양성을 위해 스타일 키워드 추가
+            enhanced_query = f"{query.strip()} lifestyle"
+            url = f"https://api.unsplash.com/search/photos?query={enhanced_query}&client_id={UNSPLASH_KEY}&per_page=20&page={random.randint(1, 30)}"
             res = requests.get(url, timeout=10).json()
             
             if res.get('results'):
-                # 결과 30장을 무작위로 섞음
-                results = res['results']
-                random.shuffle(results)
-                
-                found = False
-                for photo in results:
-                    p_id = photo['id']
-                    # 이미 이번 포스팅에서 뽑힌 ID가 아닌 경우만 선택
-                    if p_id not in session_used_ids:
+                random.shuffle(res['results'])
+                for photo in res['results']:
+                    if photo['id'] not in used_ids:
                         image_urls.append(photo['urls']['regular'])
-                        session_used_ids.add(p_id)
-                        found = True
+                        used_ids.add(photo['id'])
                         break
-                
-                if not found: # 30장 모두 중복이라면(드문 경우) 첫 번째 사진 사용
-                    image_urls.append(results[0]['urls']['regular'])
-            else:
-                image_urls.append(default_img)
-        except:
-            image_urls.append(default_img)
-            
-    # 혹시라도 5장이 안 채워졌을 경우 대비
+        except: continue
+    
+    # 부족한 사진 채우기
     while len(image_urls) < 5:
-        image_urls.append(default_img)
-        
-    return image_urls
+        image_urls.append("https://images.unsplash.com/photo-1555252333-9f8e92e65df9")
+    return image_urls[:5]
 
 def get_blog_content(post_number):
     try:
+        # 지피티에게 주제를 다양하게 잡으라고 페르소나 부여
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a professional blogger. Write in ENGLISH. Use <h3> for subheadings. NO ** or #."},
-                {"role": "user", "content": f"Post {post_number}: Write about a Korean parenting gear. \nTitle: [Title]\nKeywords: [5 different English keywords for images]\nBody: 5 sections. Place [IMAGE1] to [IMAGE5]."}
+                {"role": "system", "content": "You are an expert parenting influencer. Write a high-quality blog post. Use <h3> for subheadings. NO ** or # symbols."},
+                {"role": "user", "content": f"Post {post_number}: Pick ONE specific trendy Korean parenting item (e.g., a specific bouncer, high chair, or mat). \n1. Title: Catchy and SEO-friendly. \n2. Keywords: List 5 DIFFERENT visual keywords for Unsplash (e.g., 'minimalist nursery', 'wooden baby toy', 'happy mother and baby'). \n3. Body: 5 detailed sections. End each section with [IMAGE1] to [IMAGE5]."}
             ]
         )
         text = response.choices[0].message.content.strip()
         lines = text.split('\n')
 
-        title = "Parenting Gear Review"
-        keywords = ["baby product"]
+        title = "Best Parenting Gear Review"
+        keywords = []
+        
+        # 데이터 정제
         for line in lines:
-            if "Title:" in line: title = line.replace("Title:", "").replace("**", "").replace("#", "").strip()
-            if "Keywords:" in line: keywords = [k.strip() for k in line.replace("Keywords:", "").split(',') if k.strip()]
+            if "Title:" in line: title = line.replace("Title:", "").strip()
+            if "Keywords:" in line:
+                keywords = [k.strip() for k in line.replace("Keywords:", "").split(',') if k.strip()]
 
-        # 중복 방지 로직이 적용된 사진 가져오기
-        final_images = get_5_unique_images(keywords)
+        # 사진 가져오기
+        final_images = get_unique_images_by_keywords(keywords)
 
         content_parts = []
         for line in lines:
             if any(x in line for x in ["Title:", "Keywords:"]): continue
-            clean_line = line.replace("**", "").replace("#", "").strip()
+            clean_line = line.strip()
             if not clean_line: continue
             
-            # 소제목 가독성 스타일 (크게, 파란 선)
-            if clean_line.startswith('<h3') or clean_line.endswith(':') or (len(clean_line) < 50 and clean_line[0].isdigit()):
-                pure_text = clean_line.replace("<h3>","").replace("</h3>","").replace(":","")
-                content_parts.append(f'<h3 style="color: #2c3e50; margin-top: 40px; margin-bottom: 20px; font-size: 1.6em; border-left: 6px solid #3498db; padding-left: 15px; font-weight: bold;">{pure_text}</h3>')
+            # 소제목 가독성 (크게, 파란 선, ** 제거)
+            if clean_line.startswith('<h3') or clean_line.endswith(':') or (len(clean_line) < 60 and clean_line[0].isdigit()):
+                pure_text = clean_line.replace("<h3>","").replace("</h3>","").replace(":","").replace("**", "")
+                content_parts.append(f'<h3 style="color: #2c3e50; margin-top: 40px; margin-bottom: 20px; font-size: 1.65em; border-left: 6px solid #3498db; padding-left: 15px; font-weight: bold; line-height: 1.4;">{pure_text}</h3>')
             else:
-                content_parts.append(f'<p style="line-height: 1.8; margin-bottom: 20px; font-size: 1.1em;">{clean_line}</p>')
+                content_parts.append(f'<p style="line-height: 1.9; margin-bottom: 25px; font-size: 1.1em; color: #444;">{clean_line}</p>')
 
         content_body = "".join(content_parts)
         for i in range(5):
-            img_html = f'<div style="text-align:center; margin:35px 0;"><img src="{final_images[i]}" style="width:100%; max-width:750px; border-radius:12px; box-shadow: 0 10px 20px rgba(0,0,0,0.1);"></div>'
+            img_html = f'<div style="text-align:center; margin:45px 0;"><img src="{final_images[i]}" style="width:100%; max-width:800px; border-radius:15px; box-shadow: 0 12px 24px rgba(0,0,0,0.15);"></div>'
             content_body = content_body.replace(f"[IMAGE{i+1}]", img_html)
 
         return title, content_body
@@ -105,10 +93,10 @@ def post_to_wordpress(title, content):
     payload = {"title": title, "content": content, "status": "draft"}
     res = requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_PASS), json=payload)
     if res.status_code == 201:
-        print(f"✅ 포스팅 완료: {title}")
+        print(f"✅ 포스팅 성공: {title}")
 
 if __name__ == "__main__":
-    for i in range(random.randint(2, 3)):
+    for i in range(2):
         t, c = get_blog_content(i + 1)
         post_to_wordpress(t, c)
-        time.sleep(10)
+        time.sleep(15)
