@@ -2,15 +2,31 @@ name: Auto Blog Post
 
 on:
   schedule:
-    # 한국 시간(KST) 기준으로 설정 (UTC 기준이라 9시간 차이)
-    # 아래 설정은 한국 시간 기준 매일 오전 9시, 오후 3시, 오후 9시에 실행됩니다.
-    - cron: '0 0,6,12 * * *'
-  workflow_dispatch: # 수동으로 실행 버튼을 누를 때도 작동함
+    # GitHub Actions는 UTC 기준이므로 한국 시간(KST)에서 9시간을 뺍니다.
+    
+    # 1. 오전 타임: 08:30, 09:00, 09:30
+    # (UTC 기준: 전날 23:30, 당일 00:00, 당일 00:30)
+    - cron: '30 23 * * *'
+    - cron: '0 0 * * *'
+    - cron: '30 0 * * *'
+    
+    # 2. 오후 타임: 14:30, 15:00, 15:30
+    # (UTC 기준: 당일 05:30, 06:00, 06:30)
+    - cron: '30 5 * * *'
+    - cron: '0 6 * * *'
+    - cron: '30 6 * * *'
+    
+    # 3. 저녁 타임: 20:30, 21:00, 21:30
+    # (UTC 기준: 당일 11:30, 12:00, 12:30)
+    - cron: '30 11 * * *'
+    - cron: '0 12 * * *'
+    - cron: '30 12 * * *'
+
+  workflow_dispatch: # 수동으로 즉시 실행하고 싶을 때 사용하는 버튼
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
