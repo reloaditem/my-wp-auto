@@ -23,9 +23,10 @@ CATEGORY_MAP = {
 
 def get_unique_images(topic):
     image_urls = []
-    for i in range(5):
+    # 3장 정도의 이미지를 가져옵니다 (너무 많으면 API 지연 발생 가능)
+    for i in range(3):
         try:
-            url = f"https://api.unsplash.com/search/photos?query={topic}&client_id={UNSPLASH_KEY}&per_page=10"
+            url = f"https://api.unsplash.com/search/photos?query={topic}&client_id={UNSPLASH_KEY}&per_page=15"
             res = requests.get(url, timeout=10)
             if res.status_code == 200:
                 results = res.json().get('results')
@@ -33,38 +34,61 @@ def get_unique_images(topic):
                     image_urls.append(random.choice(results)['urls']['regular'])
                     continue
         except: pass
+        # API 오류 시 백업용 랜덤 이미지
         image_urls.append(f"https://picsum.photos/seed/{random.randint(1,9999)}/800/600")
     return image_urls
 
 def post_one_blog():
     topic = random.choice(list(CATEGORY_MAP.keys()))
     cat_id = CATEGORY_MAP[topic]
+    print(f"🚀 주제 선정: {topic}")
+    
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a professional blogger. Write in HTML. Subheadings <h2> must have style 'border-left:10px solid #f2a365; padding-left:15px; color:#1a2a6c;'. Use [IMAGE1] to [IMAGE5] placeholders."},
+                {"role": "system", "content": "You are a professional blogger. Write in HTML. Subheadings <h2> must have style 'border-left:10px solid #f2a365; padding-left:15px; color:#1a2a6c; margin-top:30px;'. YOU MUST USE [IMAGE1], [IMAGE2], [IMAGE3] tags in your content."},
                 {"role": "user", "content": f"Write a long blog post about {topic}. Start with 'Title: [Your Title]'."}
             ]
         )
         full_text = response.choices[0].message.content.strip()
-        title = full_text.split('\n')[0].replace('Title:', '').strip()
-        content_body = full_text.split('\n', 1)[1].strip()
+        
+        # 타이틀 분리
+        if "Title:" in full_text:
+            title = full_text.split('\n')[0].replace('Title:', '').strip()
+            content_body = full_text.split('\n', 1)[1].strip()
+        else:
+            title = f"Special Insight: {topic}"
+            content_body = full_text
 
+        # 이미지 가져오기 및 교체
         images = get_unique_images(topic)
+        used_image_count = 0
+        
         for i, img_url in enumerate(images):
             tag = f'<figure style="margin:40px 0; text-align:center;"><img src="{img_url}" style="width:100%; border-radius:15px; box-shadow:0 8px 16px rgba(0,0,0,0.1);"></figure>'
             placeholder = f"[IMAGE{i+1}]"
+            
             if placeholder in content_body:
                 content_body = content_body.replace(placeholder, tag)
+                used_image_count += 1
             else:
+                # 본문에 태그가 없으면 글 맨 뒤에 사진을 강제로 추가
                 content_body += f"\n\n{tag}"
+                used_image_count += 1
 
-        payload = {"title": title, "content": content_body, "status": "publish", "categories": [cat_id]}
+        payload = {
+            "title": title, 
+            "content": content_body, 
+            "status": "publish", 
+            "categories": [cat_id]
+        }
+        
         res = requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_PASS), json=payload)
-        print(f"Post Success: {title} (Status: {res.status_code})")
+        print(f"✅ 발행 성공: {title} (상태: {res.status_code})")
+        
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ 오류 발생: {e}")
 
 if __name__ == "__main__":
     post_one_blog()
