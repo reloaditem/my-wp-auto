@@ -3,7 +3,6 @@ import requests
 from requests.auth import HTTPBasicAuth
 from openai import OpenAI
 import random
-import time
 
 # 환경 변수 설정
 OPENAI_KEY = os.environ.get('OPENAI_API_KEY')
@@ -21,78 +20,51 @@ CATEGORY_MAP = {
     "Advanced Parenting Science": 3,
     "Biohacking & Family Longevity": 2
 }
-TOPICS = list(CATEGORY_MAP.keys())
 
-def get_unique_images(keywords):
+def get_unique_images(topic):
     image_urls = []
-    used_ids = set()
     for i in range(5):
-        query = keywords[i] if i < len(keywords) else "lifestyle"
-        found = False
         try:
-            url = f"https://api.unsplash.com/search/photos?query={query.strip()}&client_id={UNSPLASH_KEY}&per_page=30&page={random.randint(1, 100)}"
+            url = f"https://api.unsplash.com/search/photos?query={topic}&client_id={UNSPLASH_KEY}&per_page=10"
             res = requests.get(url, timeout=10)
             if res.status_code == 200:
                 results = res.json().get('results')
                 if results:
-                    photo = random.choice(results)
-                    if photo['id'] not in used_ids:
-                        image_urls.append(photo['urls']['regular'])
-                        used_ids.add(photo['id'])
-                        found = True
+                    image_urls.append(random.choice(results)['urls']['regular'])
+                    continue
         except: pass
-        if not found:
-            image_urls.append(f"https://picsum.photos/seed/{random.randint(1, 9999)}/800/600")
+        image_urls.append(f"https://picsum.photos/seed/{random.randint(1,9999)}/800/600")
     return image_urls
 
-def get_blog_content():
-    selected = random.choice(TOPICS)
-    cat_id = CATEGORY_MAP[selected]
+def post_one_blog():
+    topic = random.choice(list(CATEGORY_MAP.keys()))
+    cat_id = CATEGORY_MAP[topic]
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": f"You are a pro blogger. Write about {selected}. Use <h2> for subheadings. NO ** symbols."},
-                {"role": "user", "content": f"Write a 5-section blog. Title: [Title], Keywords: [5 keywords], Body: Use [IMAGE1] to [IMAGE5]."}
+                {"role": "system", "content": "You are a professional blogger. Write in HTML. Subheadings <h2> must have style 'border-left:10px solid #f2a365; padding-left:15px; color:#1a2a6c;'. Use [IMAGE1] to [IMAGE5] placeholders."},
+                {"role": "user", "content": f"Write a long blog post about {topic}. Start with 'Title: [Your Title]'."}
             ]
         )
-        text = response.choices[0].message.content.strip()
-        lines = text.split('\n')
-        title = f"Latest on {selected}"
-        keywords = ["lifestyle"]
-        
-        for line in lines:
-            if "Title:" in line: title = line.replace("Title:", "").replace("**", "").replace("#", "").strip()
-            if "Keywords:" in line: keywords = [k.strip() for k in line.replace("Keywords:", "").split(',') if k.strip()]
+        full_text = response.choices[0].message.content.strip()
+        title = full_text.split('\n')[0].replace('Title:', '').strip()
+        content_body = full_text.split('\n', 1)[1].strip()
 
-        final_images = get_unique_images(keywords)
-        content_parts = []
-        
-        for line in lines:
-            if any(x in line for x in ["Title:", "Keywords:"]): continue
-            clean_line = line.replace("**", "").replace("#", "").strip()
-            if not clean_line: continue
-            
-            # 소제목 인식 강화 (길이 기준 완화 및 조건 추가)
-            is_heading = (len(clean_line) < 70) and (clean_line[0].isdigit() or clean_line.endswith(':') or clean_line.istitle())
-
-            if is_heading:
-                pure_text = clean_line.lstrip("0123456789. :").strip(" :")
-                content_parts.append(f'<h2 style="color:#1a2a6c; margin:45px 0 20px 0; border-left:10px solid #f2a365; padding-left:15px; font-weight:bold; font-size:1.6em; line-height:1.3;">{pure_text}</h2>')
+        images = get_unique_images(topic)
+        for i, img_url in enumerate(images):
+            tag = f'<figure style="margin:40px 0; text-align:center;"><img src="{img_url}" style="width:100%; border-radius:15px; box-shadow:0 8px 16px rgba(0,0,0,0.1);"></figure>'
+            placeholder = f"[IMAGE{i+1}]"
+            if placeholder in content_body:
+                content_body = content_body.replace(placeholder, tag)
             else:
-                content_parts.append(f'<p style="line-height:2.0; margin-bottom:25px; font-size:1.15em; color:#333;">{clean_line}</p>')
+                content_body += f"\n\n{tag}"
 
-        content_body = "".join(content_parts)
-        for i in range(len(final_images)):
-            img_tag = f'<figure style="text-align:center; margin:40px 0;"><img src="{final_images[i]}" style="width:100%; border-radius:15px; box-shadow:0 10px 20px rgba(0,0,0,0.1);"></figure>'
-            content_body = content_body.replace(f"[IMAGE{i+1}]", img_tag)
-        return title, content_body, cat_id
-    except: return None, None, None
+        payload = {"title": title, "content": content_body, "status": "publish", "categories": [cat_id]}
+        res = requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_PASS), json=payload)
+        print(f"Post Success: {title} (Status: {res.status_code})")
+    except Exception as e:
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
-    for i in range(2):
-        t, c, cid = get_blog_content()
-        if t and c:
-            payload = {"title": t, "content": c, "status": "publish", "categories": [cid]}
-            requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_PASS), json=payload)
-        time.sleep(20)
+    post_one_blog()
