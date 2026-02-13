@@ -1,4 +1,5 @@
 import os
+import random
 import requests
 from requests.auth import HTTPBasicAuth
 from openai import OpenAI
@@ -10,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 WP_USER = os.environ.get("WP_USER")
 WP_PASS = os.environ.get("WP_PASS")
+UNSPLASH_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")  # ✅ 필요
 
 WP_BASE = "https://reloaditem.com/wp-json/wp/v2"
 WP_POSTS_URL = f"{WP_BASE}/posts"
@@ -20,15 +22,16 @@ client = OpenAI(api_key=OPENAI_KEY)
 # ==============================
 # 예약 설정
 # ==============================
-DAYS_TO_SCHEDULE = 7           # 몇 개 예약할지 (5~7 추천)
-POST_TIME_KST_HOUR = 10        # 한국시간 발행 시각
+DAYS_TO_SCHEDULE = 7            # 처음엔 5~7 추천
+POST_TIME_KST_HOUR = 10         # 한국시간 발행 시각
 POST_TIME_KST_MIN = 0
 
 MIN_SCORE = 80
-MAX_RETRY_IF_LOW_SCORE = 1     # 점수 낮으면 재시도 1회
+MAX_RETRY_IF_LOW_SCORE = 1      # 점수 낮으면 재시도 1회
 
 # ==============================
 # 고단가 PLAN (topic, category_slug)
+# slug는 WP 카테고리 화면에서 확인한 값과 동일해야 함
 # ==============================
 PLAN = [
     ("HubSpot vs Salesforce Pricing (2026): Which CRM Is Better for Small Businesses?", "crm-software"),
@@ -69,6 +72,78 @@ def kst_to_date_gmt(dt_kst: datetime) -> str:
     dt_utc = dt_kst.astimezone(timezone.utc)
     return dt_utc.strftime("%Y-%m-%dT%H:%M:%S")
 
+# ==============================
+# Images (본문 3장)
+# ==============================
+def get_unique_images(query: str, n: int = 3):
+    """Unsplash에서 n개 이미지 URL 가져오기(실패 시 picsum 대체)"""
+    urls = []
+    for _ in range(n):
+        try:
+            if UNSPLASH_KEY:
+                url = f"https://api.unsplash.com/search/photos?query={query}&client_id={UNSPLASH_KEY}&per_page=15"
+                res = requests.get(url, timeout=10)
+                if res.status_code == 200:
+                    results = res.json().get("results", [])
+                    if results:
+                        urls.append(random.choice(results)["urls"]["regular"])
+                        continue
+        except:
+            pass
+        urls.append(f"https://picsum.photos/seed/{random.randint(1,999999)}/1200/675")
+    return urls
+
+def inject_images_into_html(article_html: str, query: str):
+    """
+    본문에 이미지 3장 삽입:
+    - <h1> 뒤(상단)
+    - 첫 <h2> 앞(중간)
+    - FAQ(문자열) 근처 또는 맨 끝(하단)
+    """
+    imgs = get_unique_images(query, 3)
+    figures = []
+    for u in imgs:
+        figures.append(
+            f'<figure style="margin:28px 0; text-align:center;">'
+            f'<img src="{u}" alt="{query}" style="width:100%; border-radius:12px;"/>'
+            f'<figcaption style="color:#888; font-size:0.9em; margin-top:8px;">{query}</figcaption>'
+            f'</figure>'
+        )
+
+    html_lower = article_html.lower()
+
+    # 1) <h1> 닫힌 뒤 삽입
+    if "<h1" in html_lower:
+        end = html_lower.find("</h1>")
+        if end != -1:
+            insert_at = end + len("</h1>")
+            article_html = article_html[:insert_at] + figures[0] + article_html[insert_at:]
+        else:
+            article_html = figures[0] + article_html
+    else:
+        article_html = figures[0] + article_html
+
+    # 2) 첫 <h2> 앞에 삽입
+    html_lower = article_html.lower()
+    idx_h2 = html_lower.find("<h2")
+    if idx_h2 != -1:
+        article_html = article_html[:idx_h2] + figures[1] + article_html[idx_h2:]
+    else:
+        article_html += figures[1]
+
+    # 3) FAQ 근처(찾으면 그 앞), 없으면 끝
+    html_lower = article_html.lower()
+    faq_idx = html_lower.find("faq")
+    if faq_idx != -1:
+        article_html = article_html[:faq_idx] + figures[2] + article_html[faq_idx:]
+    else:
+        article_html += figures[2]
+
+    return article_html
+
+# ==============================
+# Prompts
+# ==============================
 def build_prompts(topic: str):
     gen_system = """
 You are a professional SaaS reviewer writing for small business owners.
@@ -155,12 +230,15 @@ def generate_improve_score(topic: str):
 
     return improved, score
 
+# ==============================
+# WordPress schedule post
+# ==============================
 def schedule_post(title: str, content_html: str, category_id: int, date_gmt_iso: str):
     payload = {
         "title": title,
         "content": content_html,
         "status": "future",          # 예약 발행
-        "date_gmt": date_gmt_iso,    # UTC 기준 예약 시간
+        "date_gmt": date_gmt_iso,    # UTC 기준
         "categories": [category_id],
     }
     r = requests.post(WP_POSTS_URL, auth=wp_auth(), json=payload, timeout=30)
@@ -172,6 +250,8 @@ def schedule_post(title: str, content_html: str, category_id: int, date_gmt_iso:
 def main():
     if not (OPENAI_KEY and WP_USER and WP_PASS):
         raise RuntimeError("Missing env vars: OPENAI_API_KEY, WP_USER, WP_PASS")
+    if not UNSPLASH_KEY:
+        print("⚠ UNSPLASH_ACCESS_KEY not set. Will use picsum fallback images.")
 
     # 내일 KST부터 하루 1개씩 예약
     KST = timezone(timedelta(hours=9))
@@ -210,6 +290,9 @@ def main():
             print(f"New score: {score}")
 
         if score >= MIN_SCORE:
+            # ✅ 이미지 주입 (방법 1: 본문 이미지 삽입)
+            content = inject_images_into_html(content, topic)
+
             status, body = schedule_post(topic, content, cat_id, date_gmt)
             print(f"WordPress status: {status}")
             if status in (200, 201):
