@@ -23,11 +23,8 @@ MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 POST_HOUR = int(os.environ.get("POST_HOUR", "10"))
 POST_MINUTE = int(os.environ.get("POST_MINUTE", "0"))
 DAYS_AHEAD_START = int(os.environ.get("DAYS_AHEAD_START", "1"))
-
-# 한 번 실행에 "클러스터 몇 세트" 만들지 (1세트=3글)
 CLUSTER_COUNT = int(os.environ.get("CLUSTER_COUNT", "1"))
 
-# 어떤 카테고리든 랜덤(원하면 uncategorized 제외는 아래에서 처리)
 EXCLUDE_CATEGORY_SLUGS = set(
     s.strip() for s in os.environ.get("EXCLUDE_CATEGORY_SLUGS", "").split(",") if s.strip()
 )
@@ -38,27 +35,24 @@ AUTH = HTTPBasicAuth(WP_USER, WP_PASS)
 
 client = OpenAI(api_key=OPENAI_KEY)
 
-
 # ==============================
 # Helpers
 # ==============================
+IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.I)
+
 def strip_tags(s: str) -> str:
     return re.sub(r"<[^>]+>", "", s or "").strip()
-
 
 def normalize_title(t: str) -> str:
     t = strip_tags(t)
     t = re.sub(r"\s+", " ", t).strip().lower()
     return t
 
-
 def wp_get(url: str):
     return requests.get(url, auth=AUTH, timeout=50)
 
-
 def wp_post(url: str, json_data: dict):
     return requests.post(url, auth=AUTH, json=json_data, timeout=90)
-
 
 def fetch_categories() -> List[dict]:
     out = []
@@ -73,12 +67,9 @@ def fetch_categories() -> List[dict]:
         if page >= total_pages:
             break
         page += 1
-
-    # slug/id 있는 것만 + 제외 슬러그 제거
     out = [c for c in out if c.get("slug") and c.get("id")]
     out = [c for c in out if c.get("slug") not in EXCLUDE_CATEGORY_SLUGS]
     return out
-
 
 def fetch_recent_titles() -> Set[str]:
     titles = set()
@@ -89,7 +80,6 @@ def fetch_recent_titles() -> Set[str]:
         for p in (r.json() or []):
             titles.add(normalize_title(p.get("title", {}).get("rendered", "")))
     return titles
-
 
 # ==============================
 # Schedule: 10:00 + collision avoid
@@ -106,14 +96,12 @@ def get_future_dates_set():
             pass
     return used
 
-
 def next_available_10am(start_day: datetime, used: set):
     d = start_day.replace(hour=POST_HOUR, minute=POST_MINUTE, second=0, microsecond=0)
     while d in used:
         d += timedelta(days=1)
     used.add(d)
     return d
-
 
 # ==============================
 # Images
@@ -131,11 +119,10 @@ def unsplash_random(query: str) -> str:
         return (r.json().get("urls") or {}).get("regular") or ""
     return ""
 
-
 def pick_inline_urls(title: str):
     q1 = title
     q2 = f"{title} software dashboard"
-    q3 = f"{title} checklist"
+    q3 = f"{title} workflow automation"
 
     urls = []
     for q in (q1, q2, q3):
@@ -152,7 +139,6 @@ def pick_inline_urls(title: str):
         f"https://picsum.photos/seed/{seed}-bot/1200/800",
     ]
 
-
 def img_block(url: str, alt: str) -> str:
     return (
         f'<figure style="margin:28px 0;">'
@@ -160,6 +146,25 @@ def img_block(url: str, alt: str) -> str:
         f"</figure>"
     )
 
+# ==============================
+# PartnerStack-safe: 가격 금액 제거(후처리)
+# ==============================
+CURRENCY_RE = re.compile(
+    r"(\$|€|£|₩)\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s?(\$|€|£|₩)",
+    re.I
+)
+PER_RE = re.compile(r"\b(per\s+(month|mo|year|yr)|/mo|/month|/yr|/year)\b", re.I)
+
+def sanitize_pricing(html: str) -> str:
+    """
+    - 정확한 금액/통화 표기를 제거
+    - 'per month' 같은 표현도 완화
+    """
+    html = CURRENCY_RE.sub("pricing varies", html)
+    html = PER_RE.sub("", html)
+    # 표 안에 남는 'pricing varies'가 너무 많으면 읽기 어려우니 약간 정리
+    html = re.sub(r"\bpricing varies\b(?:\s*-\s*pricing varies\b)+", "pricing varies", html, flags=re.I)
+    return html
 
 # ==============================
 # Checklist (저장/출력)
@@ -172,7 +177,7 @@ def checklist_html() -> str:
             "<ul>",
             "<li><strong>Pick 2–3 tools</strong> that match your budget and workflow.</li>",
             "<li><strong>Confirm must-have features</strong> (integrations, automation, reporting).</li>",
-            "<li><strong>Check pricing</strong>: add-ons, limits, annual discounts.</li>",
+            "<li><strong>Check pricing structure</strong>: limits, add-ons, annual discounts.</li>",
             "<li><strong>Run a 7-day test</strong> with one real workflow end-to-end.</li>",
             "<li><strong>Decide & document</strong> success metrics and next steps.</li>",
             "</ul>",
@@ -180,6 +185,23 @@ def checklist_html() -> str:
         ]
     )
 
+# ==============================
+# Internal link block
+# ==============================
+def make_link_block(list_url: str, comp_url: str, deep_url: str) -> str:
+    return "\n".join(
+        [
+            '<div class="rp-related" style="border:1px solid rgba(0,0,0,.08);padding:14px 16px;border-radius:12px;margin:18px 0;">',
+            "<strong>Related in this series</strong>",
+            "<ul>",
+            f'<li><a href="{list_url}">Start here: Best tools list</a></li>',
+            f'<li><a href="{comp_url}">Compare: A vs B vs C</a></li>',
+            f'<li><a href="{deep_url}">Deep dive: pricing & setup guide</a></li>',
+            "</ul>",
+            "<p style='margin:10px 0 0;'>Tip: Use the checklist at the end to save as PDF or print.</p>",
+            "</div>",
+        ]
+    )
 
 # ==============================
 # OpenAI
@@ -192,19 +214,7 @@ def call_openai(messages):
     )
     return resp.choices[0].message.content.strip()
 
-
 def gen_cluster_plan(recent_titles: Set[str]) -> dict:
-    """
-    Return JSON ONLY:
-    {
-      "topic": "...",
-      "list_title": "...(2026)",
-      "comparison_title": "A vs B vs C ...(2026)",
-      "deep_title": "A Pricing ...(2026)",
-      "tools": ["A","B","C"],
-      "deep_tool": "A"
-    }
-    """
     avoid = ", ".join(list(recent_titles)[:12]) if recent_titles else ""
     messages = [
         {
@@ -228,50 +238,50 @@ def gen_cluster_plan(recent_titles: Set[str]) -> dict:
     raw = raw[raw.find("{") : raw.rfind("}") + 1]
     return json.loads(raw)
 
-
 def article_prompt_base() -> str:
+    # ✅ 가격은 “구조/포인트”만, 정확한 금액은 절대 금지
     return (
         "You are a professional SaaS reviewer writing for small businesses.\n"
         "Write a detailed SEO article (minimum ~1500 words).\n"
         "Use clean HTML only (no markdown).\n"
-        "Include: pricing, pros/cons, a comparison table, who this is for, how we evaluate, disclosure, FAQs.\n"
+        "Pricing rules (IMPORTANT):\n"
+        "- Do NOT include exact prices or currency amounts ($, €, £, ₩, numbers like $29, 29/mo, etc.).\n"
+        "- Describe pricing as plan structure (Free / Starter / Pro / Enterprise), limits, and what to verify.\n"
+        "- Use phrases like 'pricing varies' and 'check the official pricing page'.\n"
+        "Include: pros/cons, a comparison table (NO exact prices), who this is for, how we evaluate, disclosure, FAQs.\n"
         "In the INTRO, add a short note that a save/print-friendly checklist is included at the end using shortcode [rp_intro_checklist_v1].\n"
-        "Insert placeholders naturally: [IMAGE_TOP], [IMAGE_MID], [IMAGE_BOT].\n"
         "At the END, include a section titled 'Save / Print Checklist' and include shortcode [rp_save_print_v1].\n"
         "Avoid overly promotional tone. Be specific and structured.\n"
     )
 
-
 def generate_article(title: str, role: str, tools: List[str]) -> str:
     """
     role: 'list' | 'comparison' | 'deep'
-    tools: ["A","B","C"]  (deep의 A=tools[0], alternatives=tools[1], tools[2])
+    tools: ["A","B","C"]  (deep: A=tools[0], alternatives=B,C)
     """
     A, B, C = tools[0], tools[1], tools[2]
 
     if role == "list":
         link_rules = (
             "Add 2–3 contextual internal links in the body using these placeholders exactly:\n"
-            "- [[LINK_COMP]] once (refer to the comparison)\n"
-            "- [[LINK_DEEP]] once (refer to the pricing/guide)\n"
+            "- [[LINK_COMP]] once\n"
+            "- [[LINK_DEEP]] once\n"
             'Format example: <a href="[[LINK_COMP]]">see the full comparison</a>\n'
         )
     elif role == "comparison":
         link_rules = (
             "Add 2–3 contextual internal links in the body using these placeholders exactly:\n"
-            "- [[LINK_LIST]] once (refer to the best-tools list)\n"
-            "- [[LINK_DEEP]] once (refer to the deep dive)\n"
+            "- [[LINK_LIST]] once\n"
+            "- [[LINK_DEEP]] once\n"
         )
     else:  # deep
         link_rules = (
             "Add 2–3 contextual internal links in the body using these placeholders exactly:\n"
             "- [[LINK_LIST]] once\n"
             "- [[LINK_COMP]] once\n"
-            "Also include an 'Alternatives' section that mentions the two alternatives and uses these placeholders:\n"
-            f"- Mention {B} as [[ALT_B]]\n"
-            f"- Mention {C} as [[ALT_C]]\n"
-            "In that Alternatives section, each alternative name MUST be wrapped as a link like:\n"
-            '<a href="[[ALT_B]]">ToolName</a>\n'
+            "Also include an 'Alternatives' section that links the alternatives to the comparison using placeholders:\n"
+            f'- Mention {B} as <a href="[[ALT_B]]">{B}</a>\n'
+            f'- Mention {C} as <a href="[[ALT_C]]">{C}</a>\n'
         )
 
     cluster_context = (
@@ -288,13 +298,65 @@ def generate_article(title: str, role: str, tools: List[str]) -> str:
                 f"Title: {title}\n"
                 f"{cluster_context}\n"
                 f"{link_rules}\n"
-                "Do NOT output markdown. HTML only.\n"
+                "IMPORTANT: Do not include exact currency amounts.\n"
+                "HTML only.\n"
                 "Now write the article:"
             ),
         },
     ]
     return call_openai(messages)
 
+# ==============================
+# Image placement fix (강제 3곳 삽입)
+# ==============================
+def insert_images_strategic(html: str, blocks: List[str]) -> str:
+    """
+    무조건 3개를 '상단/중간/하단'에 분산 삽입.
+    - 상단: 첫 </p> 뒤
+    - 중간: 2번째 <h2> 뒤 (없으면 첫 <h2> 뒤)
+    - 하단: 체크리스트(또는 Conclusion/FAQs) 앞쪽
+    """
+    if not html:
+        return "\n".join(blocks)
+
+    # 기존 이미지가 3장 이상이면 굳이 더 넣지 않음(중복 방지)
+    if len(IMG_TAG_RE.findall(html)) >= 3:
+        return html
+
+    # 1) 상단 삽입
+    top = blocks[0]
+    m = re.search(r"</p\s*>", html, flags=re.I)
+    if m:
+        i = m.end()
+        html = html[:i] + "\n" + top + "\n" + html[i:]
+    else:
+        html = top + "\n" + html
+
+    # 2) 중간 삽입: h2 찾기
+    h2_iter = list(re.finditer(r"<h2\b[^>]*>", html, flags=re.I))
+    mid = blocks[1]
+    if len(h2_iter) >= 2:
+        # 2번째 h2 태그 뒤쪽에 넣기
+        pos = h2_iter[1].start()
+        html = html[:pos] + mid + "\n" + html[pos:]
+    elif len(h2_iter) == 1:
+        pos = h2_iter[0].start()
+        html = html[:pos] + mid + "\n" + html[pos:]
+    else:
+        # h2가 없으면 대충 중간쯤
+        pos = max(0, len(html)//2)
+        html = html[:pos] + "\n" + mid + "\n" + html[pos:]
+
+    # 3) 하단 삽입: 체크리스트/FAQ/Conclusion 앞
+    bot = blocks[2]
+    anchor = re.search(r"<h2\b[^>]*>\s*(Save\s*/\s*Print\s*Checklist|FAQ|FAQs|Conclusion)\b", html, flags=re.I)
+    if anchor:
+        pos = anchor.start()
+        html = html[:pos] + bot + "\n" + html[pos:]
+    else:
+        html = html.rstrip() + "\n" + bot + "\n"
+
+    return html
 
 # ==============================
 # Publish / Update
@@ -302,11 +364,19 @@ def generate_article(title: str, role: str, tools: List[str]) -> str:
 def publish_future_post(
     title: str, content: str, category_id: int, publish_date: datetime
 ) -> Optional[dict]:
-    u1, u2, u3 = pick_inline_urls(title)
-    content = content.replace("[IMAGE_TOP]", img_block(u1, f"{title} cover"))
-    content = content.replace("[IMAGE_MID]", img_block(u2, f"{title} example"))
-    content = content.replace("[IMAGE_BOT]", img_block(u3, f"{title} checklist"))
+    # 1) 가격 금액 제거 후처리
+    content = sanitize_pricing(content)
 
+    # 2) 이미지 URL 준비 + 강제 분산 삽입
+    u1, u2, u3 = pick_inline_urls(title)
+    blocks = [
+        img_block(u1, f"{title} cover"),
+        img_block(u2, f"{title} example"),
+        img_block(u3, f"{title} workflow"),
+    ]
+    content = insert_images_strategic(content, blocks)
+
+    # 3) 체크리스트 보장
     if "Save / Print Checklist" not in strip_tags(content):
         content = content.rstrip() + "\n" + checklist_html() + "\n"
 
@@ -325,47 +395,28 @@ def publish_future_post(
     print(r.text[:600])
     return None
 
-
-def make_link_block(list_url: str, comp_url: str, deep_url: str) -> str:
-    return "\n".join(
-        [
-            '<div class="rp-related" style="border:1px solid rgba(0,0,0,.08);padding:14px 16px;border-radius:12px;margin:18px 0;">',
-            "<strong>Related in this series</strong>",
-            "<ul>",
-            f'<li><a href="{list_url}">Start here: Best tools list</a></li>',
-            f'<li><a href="{comp_url}">Compare: A vs B vs C</a></li>',
-            f'<li><a href="{deep_url}">Deep dive: pricing & setup guide</a></li>',
-            "</ul>",
-            "<p style='margin:10px 0 0;'>Tip: Use the checklist at the end to save as PDF or print.</p>",
-            "</div>",
-        ]
-    )
-
-
 def inject_and_update(post_json: dict, list_url: str, comp_url: str, deep_url: str, tools: List[str]):
     post_id = post_json["id"]
     content = post_json["content"]["rendered"]
 
-    link_block = make_link_block(list_url, comp_url, deep_url)
-
-    # 1) placeholder 치환 (href 형태 우선)
+    # placeholder 치환
     content = content.replace('href="[[LINK_LIST]]"', f'href="{list_url}"')
     content = content.replace('href="[[LINK_COMP]]"', f'href="{comp_url}"')
     content = content.replace('href="[[LINK_DEEP]]"', f'href="{deep_url}"')
 
-    # deep alternatives: B/C는 comparison으로 보내서 비교로 유도
+    # alternatives는 comparison으로 유도
     content = content.replace('href="[[ALT_B]]"', f'href="{comp_url}"')
     content = content.replace('href="[[ALT_C]]"', f'href="{comp_url}"')
 
-    # 혹시 텍스트로만 남았으면 안전 치환
     content = content.replace("[[LINK_LIST]]", list_url)
     content = content.replace("[[LINK_COMP]]", comp_url)
     content = content.replace("[[LINK_DEEP]]", deep_url)
     content = content.replace("[[ALT_B]]", comp_url)
     content = content.replace("[[ALT_C]]", comp_url)
 
-    # 2) 상단 링크박스 1회 삽입(중복 방지)
+    # 상단 링크박스 1회 삽입
     if 'class="rp-related"' not in content:
+        link_block = make_link_block(list_url, comp_url, deep_url)
         m = re.search(r"</p\s*>", content, flags=re.I)
         if m:
             i = m.end()
@@ -375,7 +426,6 @@ def inject_and_update(post_json: dict, list_url: str, comp_url: str, deep_url: s
 
     r = wp_post(f"{WP_POST_URL}/{post_id}", {"content": content})
     print("Link update:", post_id, r.status_code)
-
 
 # ==============================
 # Main
@@ -394,7 +444,6 @@ def main():
         cat_id = int(cat["id"])
         cat_slug = cat.get("slug", "")
 
-        # 1) 클러스터 계획(제목 3개 + 도구 3개)
         plan = gen_cluster_plan(recent_titles)
 
         list_title = (plan.get("list_title") or "").strip()
@@ -404,11 +453,9 @@ def main():
         if len(tools) != 3 or not list_title or not comp_title or not deep_title:
             raise RuntimeError(f"Bad cluster plan: {plan}")
 
-        # 중복 방지(간단 등록)
         for t in (list_title, comp_title, deep_title):
             recent_titles.add(normalize_title(t))
 
-        # 2) 예약 3개 확보(연속 3일, 충돌이면 밀림)
         d1 = next_available_10am(start_day, used_times)
         d2 = next_available_10am(d1 + timedelta(days=1), used_times)
         d3 = next_available_10am(d2 + timedelta(days=1), used_times)
@@ -420,7 +467,6 @@ def main():
         print(" - DEEP:", deep_title, "=>", d3.date())
         print(" - TOOLS:", tools)
 
-        # 3) 1차 발행(placeholder 링크 포함된 본문 생성)
         p1 = publish_future_post(list_title, generate_article(list_title, "list", tools), cat_id, d1)
         p2 = publish_future_post(comp_title, generate_article(comp_title, "comparison", tools), cat_id, d2)
         p3 = publish_future_post(deep_title, generate_article(deep_title, "deep", tools), cat_id, d3)
@@ -429,7 +475,6 @@ def main():
             print("Cluster publish failed; skipping link update.")
             continue
 
-        # 4) URL 수집
         list_url = p1.get("link")
         comp_url = p2.get("link")
         deep_url = p3.get("link")
@@ -437,11 +482,9 @@ def main():
             print("Missing post links; skipping link update.")
             continue
 
-        # 5) placeholder 치환 + 상단 링크박스 삽입
         inject_and_update(p1, list_url, comp_url, deep_url, tools)
         inject_and_update(p2, list_url, comp_url, deep_url, tools)
         inject_and_update(p3, list_url, comp_url, deep_url, tools)
-
 
 if __name__ == "__main__":
     main()
