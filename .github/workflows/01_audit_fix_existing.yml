@@ -1,0 +1,54 @@
+name: 01 - Audit & Fix Existing Posts
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "published | future | both"
+        required: true
+        default: "both"
+      limit:
+        description: "How many posts to process"
+        required: true
+        default: "20"
+      dry_run:
+        description: "true = preview only, false = apply"
+        required: true
+        default: "true"
+
+jobs:
+  audit_fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run audit/fix
+        env:
+          WP_BASE: https://reloaditem.com
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASS: ${{ secrets.WP_PASS }}
+          SCOPE: ${{ github.event.inputs.scope }}
+          LIMIT: ${{ github.event.inputs.limit }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          BACKUP_DIR: audit_backups
+          THUMB_BG: assets/thumbnail_bg.png
+        run: |
+          python scripts/wp_audit_fix.py
+
+      - name: Upload artifacts (backups & previews)
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit_fix_outputs
+          path: |
+            audit_backups/
+            tmp_thumbs/
