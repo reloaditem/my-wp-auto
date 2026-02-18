@@ -10,11 +10,11 @@ on:
       days_ahead_start:
         description: "Start scheduling from N days ahead"
         required: true
-        default: "1"
+        default: "0"
 
-  # 완전 자동으로 돌릴 거면 아래 주석 해제
-  # schedule:
-  #   - cron: "0 0 * * *"  # UTC 00:00 = 한국 09:00
+  schedule:
+    - cron: "0 0 * * 1"  # 월요일 KST 09:00 실행 (월/화/수 예약)
+    - cron: "0 0 * * 4"  # 목요일 KST 09:00 실행 (목/금/토 예약)
 
 jobs:
   run:
@@ -54,5 +54,7 @@ jobs:
 
           # 원하면 제외할 카테고리 슬러그(예: uncategorized)
           # EXCLUDE_CATEGORY_SLUGS: "uncategorized"
+          ALLOWED_WEEKDAYS: "0,1,2,3,4,5"
+          
         run: |
           python scripts/wp_autopost_cluster.py
