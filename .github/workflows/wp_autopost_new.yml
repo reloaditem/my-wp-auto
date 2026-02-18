@@ -27,7 +27,7 @@ jobs:
         run: |
           pip install requests openai
 
-      - name: Run autopost
+      - name: Run autopost (random category)
         env:
           WP_BASE: ${{ secrets.WP_BASE }}
           WP_USER: ${{ secrets.WP_USER }}
@@ -36,7 +36,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: "gpt-4o-mini"
 
-          # 공통 featured (네 media id)
+          # 공통 featured
           FEATURED_MEDIA_ID: "332"
 
           # 본문 이미지 (있으면 주제맞춤)
@@ -44,7 +44,10 @@ jobs:
 
           POST_HOUR: "10"
           POST_MINUTE: "0"
+
           POST_COUNT: ${{ github.event.inputs.post_count }}
           DAYS_AHEAD_START: ${{ github.event.inputs.days_ahead_start }}
+
+          RECENT_TITLE_WINDOW: "50"
         run: |
           python scripts/wp_autopost_new.py
