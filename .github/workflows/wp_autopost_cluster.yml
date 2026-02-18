@@ -1,0 +1,58 @@
+name: wp_autopost_cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_count:
+        description: "How many clusters (each cluster = 3 posts)"
+        required: true
+        default: "1"
+      days_ahead_start:
+        description: "Start scheduling from N days ahead"
+        required: true
+        default: "1"
+
+  # 완전 자동으로 돌릴 거면 아래 주석 해제
+  # schedule:
+  #   - cron: "0 0 * * *"  # UTC 00:00 = 한국 09:00
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install requests openai
+
+      - name: Run cluster autopost
+        env:
+          WP_BASE: ${{ secrets.WP_BASE }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASS: ${{ secrets.WP_PASS }}
+
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: "gpt-4o-mini"
+
+          # 공통 featured(썸네일)
+          FEATURED_MEDIA_ID: "332"
+
+          # 본문 이미지 3장(있으면 Unsplash, 없으면 picsum)
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+
+          POST_HOUR: "10"
+          POST_MINUTE: "0"
+
+          CLUSTER_COUNT: ${{ github.event.inputs.cluster_count }}
+          DAYS_AHEAD_START: ${{ github.event.inputs.days_ahead_start }}
+
+          # 원하면 제외할 카테고리 슬러그(예: uncategorized)
+          # EXCLUDE_CATEGORY_SLUGS: "uncategorized"
+        run: |
+          python scripts/wp_autopost_cluster.py
