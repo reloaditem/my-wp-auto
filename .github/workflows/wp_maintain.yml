@@ -1,22 +1,14 @@
-name: wp_maintain
+name: wp_maintain_all
 
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "mode: maintain(덮어쓰기) / seed(초기세팅)"
+      per_status_limit:
+        description: "How many posts per status (publish/future) to process"
         required: true
-        default: "maintain"
-      statuses:
-        description: "publish,future"
-        required: true
-        default: "publish,future"
-      limit:
-        description: "0=all, or number"
-        required: true
-        default: "0"
+        default: "30"
       dry_run:
-        description: "1=test(no update), 0=apply"
+        description: "1 = do not update WP, just print what would happen"
         required: true
         default: "0"
 
@@ -33,19 +25,30 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install requests pillow
+          pip install requests
 
-      - name: Run wp_maintain
+      - name: Run maintain (publish + future)
         env:
           WP_BASE: ${{ secrets.WP_BASE }}
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
-          THUMBNAIL_BASE_MEDIA_ID: ${{ secrets.THUMBNAIL_BASE_MEDIA_ID }}
+
+          FEATURED_MEDIA_ID: "332"
+          FORCE_FEATURED: "1"
+
+          TARGET_STATUSES: "publish,future"
+          PER_STATUS_LIMIT: ${{ github.event.inputs.per_status_limit }}
+
+          # 금액/월요금 제거는 스크립트 기본 포함
+
+          # 이미지 3장 (없으면 생성/업로드해서 삽입)
+          ADD_IMAGES: "1"
+          UPLOAD_IMAGES: "1"
+
+          # picsum(기본) / unsplash(키 있으면)
+          IMAGE_SOURCE: "picsum"
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
 
-          MODE: ${{ github.event.inputs.mode }}
-          STATUSES: ${{ github.event.inputs.statuses }}
-          LIMIT: ${{ github.event.inputs.limit }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
-          python scripts/wp_maintain.py
+          python scripts/wp_maintain_all.py
