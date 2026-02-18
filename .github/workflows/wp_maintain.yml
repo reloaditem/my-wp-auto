@@ -1,0 +1,51 @@
+name: wp_maintain
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "mode: maintain(덮어쓰기) / seed(초기세팅)"
+        required: true
+        default: "maintain"
+      statuses:
+        description: "publish,future"
+        required: true
+        default: "publish,future"
+      limit:
+        description: "0=all, or number"
+        required: true
+        default: "0"
+      dry_run:
+        description: "1=test(no update), 0=apply"
+        required: true
+        default: "0"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install requests pillow
+
+      - name: Run wp_maintain
+        env:
+          WP_BASE: ${{ secrets.WP_BASE }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASS: ${{ secrets.WP_PASS }}
+          THUMBNAIL_BASE_MEDIA_ID: ${{ secrets.THUMBNAIL_BASE_MEDIA_ID }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+
+          MODE: ${{ github.event.inputs.mode }}
+          STATUSES: ${{ github.event.inputs.statuses }}
+          LIMIT: ${{ github.event.inputs.limit }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          python scripts/wp_maintain.py
