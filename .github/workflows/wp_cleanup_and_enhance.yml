@@ -1,0 +1,56 @@
+name: WP Cleanup + Enhance (All posts)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = 미리보기(반영X), 0 = 실제 반영"
+        required: true
+        default: "1"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Run cleanup+enhance
+        env:
+          WP_BASE_URL: https://reloaditem.com
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASS: ${{ secrets.WP_PASS }}
+
+          # 발행+예약 전체
+          TARGET_STATUSES: publish,future
+
+          # 1=미리보기, 0=반영
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+
+          # (선택) 본문 이미지 3장 고정 이미지 URL
+          # 워드프레스 미디어에 올려둔 이미지 URL 넣으면 제일 안정적
+          BRAND_IMAGE_URL: ${{ secrets.BRAND_IMAGE_URL }}
+
+          # (선택) 대표이미지(썸네일) 고정 미디어 ID (숫자)
+          FEATURED_MEDIA_ID: ${{ secrets.FEATURED_MEDIA_ID }}
+
+          # (선택) Unsplash 사용 원하면 키
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+
+        run: python scripts/wp_cleanup_and_enhance.py
+
+      - name: Upload artifacts (backup & report)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wp_cleanup_enhance_outputs
+          path: |
+            enhance_backup_*.json
+            enhance_report_*.json
