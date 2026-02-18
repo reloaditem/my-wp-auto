@@ -1,1 +1,50 @@
+name: wp_autopost_new
 
+on:
+  workflow_dispatch:
+    inputs:
+      post_count:
+        description: "How many new posts to generate and schedule"
+        required: true
+        default: "1"
+      days_ahead_start:
+        description: "Start scheduling from N days ahead"
+        required: true
+        default: "1"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install requests openai
+
+      - name: Run autopost
+        env:
+          WP_BASE: ${{ secrets.WP_BASE }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASS: ${{ secrets.WP_PASS }}
+
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: "gpt-4o-mini"
+
+          # 공통 featured (네 media id)
+          FEATURED_MEDIA_ID: "332"
+
+          # 본문 이미지 (있으면 주제맞춤)
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+
+          POST_HOUR: "10"
+          POST_MINUTE: "0"
+          POST_COUNT: ${{ github.event.inputs.post_count }}
+          DAYS_AHEAD_START: ${{ github.event.inputs.days_ahead_start }}
+        run: |
+          python scripts/wp_autopost_new.py
