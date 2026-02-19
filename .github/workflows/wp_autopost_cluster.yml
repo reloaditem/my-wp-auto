@@ -56,5 +56,7 @@ jobs:
           # EXCLUDE_CATEGORY_SLUGS: "uncategorized"
           ALLOWED_WEEKDAYS: "0,1,2,3,4,5"
           
+          DAYS_AHEAD_START: "1"
+          DAYS_AHEAD_END: "21"
         run: |
           python scripts/wp_autopost_cluster.py
