@@ -1,490 +1,491 @@
 import os
 import re
-import json
 import random
 import requests
 from datetime import datetime, timedelta
-from typing import List, Optional, Set
+from typing import Optional, List, Dict
 from requests.auth import HTTPBasicAuth
+from bs4 import BeautifulSoup
 from openai import OpenAI
+from PIL import Image
+import io
 
-# ==============================
-# ENV
-# ==============================
-WP_BASE = os.environ.get("WP_BASE", "https://reloaditem.com").rstrip("/")
-WP_USER = os.environ["WP_USER"]
-WP_PASS = os.environ["WP_PASS"]
-OPENAI_KEY = os.environ["OPENAI_API_KEY"]
+# =========================
+# ENV (레포 시크릿명 그대로)
+# =========================
+WP_BASE = os.environ.get("WP_BASE", "").rstrip("/")
+WP_USER = os.environ.get("WP_USER", "")
+WP_PASS = os.environ.get("WP_PASS", "")
 
-UNSPLASH_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "").strip()
-FEATURED_MEDIA_ID = int(os.environ.get("FEATURED_MEDIA_ID", "332"))
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
-POST_HOUR = int(os.environ.get("POST_HOUR", "10"))
-POST_MINUTE = int(os.environ.get("POST_MINUTE", "0"))
-DAYS_AHEAD_START = int(os.environ.get("DAYS_AHEAD_START", "1"))
-CLUSTER_COUNT = int(os.environ.get("CLUSTER_COUNT", "1"))
+UNSPLASH_ACCESS_KEY = (os.environ.get("UNSPLASH_ACCESS_KEY") or "").strip()
 
-EXCLUDE_CATEGORY_SLUGS = set(
-    s.strip() for s in os.environ.get("EXCLUDE_CATEGORY_SLUGS", "").split(",") if s.strip()
-)
+POST_HOUR = int((os.environ.get("POST_HOUR") or "10").strip())
+POST_MINUTE = int((os.environ.get("POST_MINUTE") or "0").strip())
 
-WP_POST_URL = f"{WP_BASE}/wp-json/wp/v2/posts"
-WP_CAT_URL = f"{WP_BASE}/wp-json/wp/v2/categories"
+# 클러스터(3개 1세트) 몇 세트 만들지
+CLUSTER_COUNT = int((os.environ.get("CLUSTER_COUNT") or "1").strip())
+
+# 빈값("")으로 들어오면 터지던 문제 방지
+DAYS_AHEAD_START = int((os.environ.get("DAYS_AHEAD_START") or "1").strip())
+
+# 월~토만(일요일 스킵): 0=월 ... 6=일
+ALLOWED_WEEKDAYS = set(int(x.strip()) for x in (os.environ.get("ALLOWED_WEEKDAYS") or "0,1,2,3,4,5").split(",") if x.strip())
+
+BRAND_TEXT = (os.environ.get("BRAND_TEXT") or "RELOADITEM").strip()
+FOOTER_TEXT = (os.environ.get("FOOTER_TEXT") or "AI TOOLS").strip()
+
+if not (WP_BASE and WP_USER and WP_PASS):
+    raise SystemExit("Missing env: WP_BASE, WP_USER, WP_PASS")
+if not OPENAI_API_KEY:
+    raise SystemExit("Missing env: OPENAI_API_KEY")
+
 AUTH = HTTPBasicAuth(WP_USER, WP_PASS)
+WP_API = f"{WP_BASE}/wp-json/wp/v2"
+POSTS_URL = f"{WP_API}/posts"
+MEDIA_URL = f"{WP_API}/media"
+CATS_URL = f"{WP_API}/categories"
 
-client = OpenAI(api_key=OPENAI_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ==============================
-# Helpers
-# ==============================
-IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.I)
+# =========================
+# 카테고리 슬러그
+# =========================
+CATEGORY_SLUGS = [
+    "crm-software",
+    "automation-tools",
+    "marketing-ai",
+    "ai-productivity",
+]
 
-def strip_tags(s: str) -> str:
-    return re.sub(r"<[^>]+>", "", s or "").strip()
+def keyword_from_slug(slug: str) -> str:
+    m = {
+        "crm-software": "CRM",
+        "automation-tools": "AUTOMATION",
+        "marketing-ai": "MARKETING",
+        "ai-productivity": "PRODUCTIVITY",
+    }
+    return m.get(slug, "AI TOOLS")
 
-def normalize_title(t: str) -> str:
-    t = strip_tags(t)
-    t = re.sub(r"\s+", " ", t).strip().lower()
-    return t
-
-def wp_get(url: str):
-    return requests.get(url, auth=AUTH, timeout=50)
+# =========================
+# WordPress helpers
+# =========================
+def wp_get(url: str, params: Optional[dict] = None):
+    return requests.get(url, params=params, auth=AUTH, timeout=60)
 
 def wp_post(url: str, json_data: dict):
-    return requests.post(url, auth=AUTH, json=json_data, timeout=90)
+    return requests.post(url, json=json_data, auth=AUTH, timeout=90)
 
-def fetch_categories() -> List[dict]:
-    out = []
-    page = 1
-    while True:
-        url = f"{WP_CAT_URL}?per_page=100&page={page}"
-        r = wp_get(url)
-        if r.status_code != 200:
-            break
-        out.extend(r.json() or [])
-        total_pages = int(r.headers.get("X-WP-TotalPages", "1"))
-        if page >= total_pages:
-            break
-        page += 1
-    out = [c for c in out if c.get("slug") and c.get("id")]
-    out = [c for c in out if c.get("slug") not in EXCLUDE_CATEGORY_SLUGS]
-    return out
+def get_category_id(slug: str) -> Optional[int]:
+    r = wp_get(CATS_URL, params={"slug": slug})
+    if r.status_code == 200 and r.json():
+        return int(r.json()[0]["id"])
+    return None
 
-def fetch_recent_titles() -> Set[str]:
-    titles = set()
-    for status in ("publish", "future"):
-        r = wp_get(f"{WP_POST_URL}?status={status}&per_page=50")
-        if r.status_code != 200:
-            continue
-        for p in (r.json() or []):
-            titles.add(normalize_title(p.get("title", {}).get("rendered", "")))
-    return titles
-
-# ==============================
-# Schedule: 10:00 + collision avoid
-# ==============================
-def get_future_dates_set():
-    r = wp_get(WP_POST_URL + "?status=future&per_page=100")
-    used = set()
+def get_last_scheduled_date() -> datetime:
+    r = wp_get(POSTS_URL, params={"status": "future", "per_page": 100})
     if r.status_code != 200:
-        return used
-    for p in (r.json() or []):
+        return datetime.now()
+    posts = r.json() or []
+    if not posts:
+        return datetime.now()
+    # WP가 ISO 문자열로 줌
+    dates = []
+    for p in posts:
         try:
-            used.add(datetime.fromisoformat(p["date"]).replace(tzinfo=None))
+            dates.append(datetime.fromisoformat(p["date"]))
         except Exception:
             pass
-    return used
+    return max(dates) if dates else datetime.now()
 
 def next_available_10am(start_day: datetime, used: set):
     d = start_day.replace(hour=POST_HOUR, minute=POST_MINUTE, second=0, microsecond=0)
-    while d in used:
-        d += timedelta(days=1)
-    used.add(d)
-    return d
+    while True:
+        if d.weekday() not in ALLOWED_WEEKDAYS:
+            d += timedelta(days=1)
+            d = d.replace(hour=POST_HOUR, minute=POST_MINUTE, second=0, microsecond=0)
+            continue
+        if d in used:
+            d += timedelta(days=1)
+            d = d.replace(hour=POST_HOUR, minute=POST_MINUTE, second=0, microsecond=0)
+            continue
+        used.add(d)
+        return d
 
-# ==============================
-# Images
-# ==============================
-def unsplash_random(query: str) -> str:
-    if not UNSPLASH_KEY:
-        return ""
-    q = requests.utils.quote(query)
-    api = (
-        f"https://api.unsplash.com/photos/random"
-        f"?query={q}&orientation=landscape&client_id={UNSPLASH_KEY}"
-    )
-    r = requests.get(api, timeout=20)
+# =========================
+# 썸네일 생성 (블랙+골드)
+# =========================
+def _get_font(size: int, bold: bool = True):
+    try:
+        from PIL import ImageFont
+        p = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        if os.path.exists(p):
+            return ImageFont.truetype(p, size=size)
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+def _wrap_lines(draw, text: str, font, max_width: int, max_lines: int = 2):
+    words = re.sub(r"\s+", " ", text.strip()).split(" ")
+    lines, cur = [], ""
+    for w in words:
+        test = (cur + " " + w).strip()
+        if draw.textlength(test, font=font) <= max_width:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        while draw.textlength(last + "…", font=font) > max_width and len(last) > 0:
+            last = last[:-1].rstrip()
+        lines[-1] = (last + "…") if last else "…"
+    return lines
+
+def make_brand_thumbnail_square(keyword: str, brand: str, footer: str, size: int = 1200) -> Image.Image:
+    from PIL import ImageDraw
+    W = H = size
+    img = Image.new("RGB", (W, H), (10, 10, 12))
+    draw = ImageDraw.Draw(img)
+
+    gold = (198, 154, 68)
+    off = (245, 245, 245)
+
+    pad = int(W * 0.05)
+    frame_w = max(3, int(W * 0.006))
+    draw.rounded_rectangle((pad, pad, W-pad, H-pad), radius=int(W*0.03), outline=gold, width=frame_w)
+
+    pad2 = pad + int(W * 0.02)
+    draw.rounded_rectangle((pad2, pad2, W-pad2, H-pad2), radius=int(W*0.028), outline=(70, 70, 78), width=max(2, frame_w//2))
+
+    header_font = _get_font(int(W * 0.06), bold=True)
+    footer_font = _get_font(int(W * 0.045), bold=False)
+
+    hx = pad2 + int(W*0.03)
+    hy = pad2 + int(H*0.06)
+    draw.text((hx, hy), brand.upper(), font=header_font, fill=off)
+
+    line_y = hy + int(W*0.09)
+    draw.line((hx, line_y, W - pad2 - int(W*0.03), line_y), fill=gold, width=max(3, int(W*0.004)))
+
+    kw = (keyword or "AI TOOLS").upper()
+    max_width = W - 2*(pad2 + int(W*0.05))
+    kw_font = _get_font(int(W*0.13), bold=True)
+    lines = _wrap_lines(draw, kw, kw_font, max_width, max_lines=2)
+    while any(draw.textlength(ln, font=kw_font) > max_width for ln in lines) and kw_font.size > 28:
+        kw_font = _get_font(max(28, kw_font.size - 4), bold=True)
+        lines = _wrap_lines(draw, kw, kw_font, max_width, max_lines=2)
+
+    line_h = int(kw_font.size * 1.12)
+    total_h = line_h * len(lines)
+    start_y = int(H*0.50) - total_h//2
+    for i, ln in enumerate(lines):
+        lw = draw.textlength(ln, font=kw_font)
+        x = (W - lw)//2
+        y = start_y + i*line_h
+        draw.text((x+2, y+2), ln, font=kw_font, fill=(0,0,0))
+        draw.text((x, y), ln, font=kw_font, fill=gold)
+
+    ft = footer.upper()
+    fw = draw.textlength(ft, font=footer_font)
+    fx = (W - fw)//2
+    fy = H - pad2 - int(H*0.10)
+    draw.text((fx, fy), ft, font=footer_font, fill=off)
+    return img
+
+def upload_png_image(img: Image.Image, filename: str, title: str, alt: str) -> Optional[int]:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    r = requests.post(MEDIA_URL, headers=headers, data=buf.getvalue(), auth=AUTH, timeout=120)
+    if r.status_code not in (200, 201):
+        print("Media upload failed:", r.status_code, r.text[:200])
+        return None
+    media_id = int(r.json()["id"])
+    requests.post(f"{MEDIA_URL}/{media_id}", json={"title": title, "alt_text": alt}, auth=AUTH, timeout=60)
+    return media_id
+
+# =========================
+# 본문 이미지(주제 기반)
+# =========================
+def picsum(seed: str, w: int = 1200, h: int = 800) -> str:
+    return f"https://picsum.photos/seed/{seed}/{w}/{h}"
+
+def unsplash_url(query: str) -> Optional[str]:
+    if not UNSPLASH_ACCESS_KEY:
+        return None
+    api = "https://api.unsplash.com/photos/random"
+    params = {"query": query, "orientation": "landscape", "client_id": UNSPLASH_ACCESS_KEY}
+    r = requests.get(api, params=params, timeout=30)
     if r.status_code == 200:
-        return (r.json().get("urls") or {}).get("regular") or ""
-    return ""
+        return (r.json().get("urls") or {}).get("regular")
+    return None
 
-def pick_inline_urls(title: str):
-    q1 = title
-    q2 = f"{title} software dashboard"
-    q3 = f"{title} workflow automation"
+def download_image(url: str) -> Optional[Tuple[bytes, str]]:
+    r = requests.get(url, timeout=60)
+    if r.status_code != 200:
+        return None
+    ctype = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
+    return r.content, ctype
 
-    urls = []
-    for q in (q1, q2, q3):
-        u = unsplash_random(q)
-        if u:
-            urls.append(u)
-    if len(urls) == 3:
-        return urls
+def upload_image_to_wp(url: str, filename_prefix: str) -> str:
+    dl = download_image(url)
+    if not dl:
+        return url
+    b, ctype = dl
+    ext = "jpg" if "jpeg" in ctype else ("png" if "png" in ctype else "jpg")
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename_prefix}.{ext}"',
+        "Content-Type": ctype,
+    }
+    r = requests.post(MEDIA_URL, headers=headers, data=b, auth=AUTH, timeout=120)
+    if r.status_code in (200, 201):
+        return r.json().get("source_url") or url
+    return url
 
-    seed = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "ai-tools"
-    return [
-        f"https://picsum.photos/seed/{seed}-top/1200/800",
-        f"https://picsum.photos/seed/{seed}-mid/1200/800",
-        f"https://picsum.photos/seed/{seed}-bot/1200/800",
-    ]
+# =========================
+# 콘텐츠 생성 (OpenAI)
+# =========================
+PRICE_GUARD = """
+Important constraints:
+- Do NOT include exact prices, $ amounts, per-month figures, or billed annually numbers.
+- If you must mention pricing, use vague language like "pricing varies" or "contact sales".
+"""
 
-def img_block(url: str, alt: str) -> str:
-    return (
-        f'<figure style="margin:28px 0;">'
-        f'<img src="{url}" alt="{alt}" style="width:100%;height:auto;border-radius:14px;" loading="lazy" />'
-        f"</figure>"
-    )
-
-# ==============================
-# PartnerStack-safe: 가격 금액 제거(후처리)
-# ==============================
-CURRENCY_RE = re.compile(
-    r"(\$|€|£|₩)\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s?(\$|€|£|₩)",
-    re.I
-)
-PER_RE = re.compile(r"\b(per\s+(month|mo|year|yr)|/mo|/month|/yr|/year)\b", re.I)
-
-def sanitize_pricing(html: str) -> str:
-    """
-    - 정확한 금액/통화 표기를 제거
-    - 'per month' 같은 표현도 완화
-    """
-    html = CURRENCY_RE.sub("pricing varies", html)
-    html = PER_RE.sub("", html)
-    # 표 안에 남는 'pricing varies'가 너무 많으면 읽기 어려우니 약간 정리
-    html = re.sub(r"\bpricing varies\b(?:\s*-\s*pricing varies\b)+", "pricing varies", html, flags=re.I)
-    return html
-
-# ==============================
-# Checklist (저장/출력)
-# ==============================
-def checklist_html() -> str:
-    return "\n".join(
-        [
-            "<h2>Save / Print Checklist</h2>",
-            "[rp_intro_checklist_v1]",
-            "<ul>",
-            "<li><strong>Pick 2–3 tools</strong> that match your budget and workflow.</li>",
-            "<li><strong>Confirm must-have features</strong> (integrations, automation, reporting).</li>",
-            "<li><strong>Check pricing structure</strong>: limits, add-ons, annual discounts.</li>",
-            "<li><strong>Run a 7-day test</strong> with one real workflow end-to-end.</li>",
-            "<li><strong>Decide & document</strong> success metrics and next steps.</li>",
-            "</ul>",
-            '[rp_save_print_v1 label="Open print window" sub="In the print window, you can save as PDF or print a copy."]',
-        ]
-    )
-
-# ==============================
-# Internal link block
-# ==============================
-def make_link_block(list_url: str, comp_url: str, deep_url: str) -> str:
-    return "\n".join(
-        [
-            '<div class="rp-related" style="border:1px solid rgba(0,0,0,.08);padding:14px 16px;border-radius:12px;margin:18px 0;">',
-            "<strong>Related in this series</strong>",
-            "<ul>",
-            f'<li><a href="{list_url}">Start here: Best tools list</a></li>',
-            f'<li><a href="{comp_url}">Compare: A vs B vs C</a></li>',
-            f'<li><a href="{deep_url}">Deep dive: pricing & setup guide</a></li>',
-            "</ul>",
-            "<p style='margin:10px 0 0;'>Tip: Use the checklist at the end to save as PDF or print.</p>",
-            "</div>",
-        ]
-    )
-
-# ==============================
-# OpenAI
-# ==============================
-def call_openai(messages):
+def call_openai(messages: List[dict]) -> str:
     resp = client.chat.completions.create(
-        model=MODEL,
+        model=OPENAI_MODEL,
         messages=messages,
-        temperature=0.6,
+        temperature=0.7,
     )
-    return resp.choices[0].message.content.strip()
+    return (resp.choices[0].message.content or "").strip()
 
-def gen_cluster_plan(recent_titles: Set[str]) -> dict:
-    avoid = ", ".join(list(recent_titles)[:12]) if recent_titles else ""
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You plan a 3-post topical cluster for a SaaS/AI tools blog.\n"
-                "Return ONLY valid JSON with keys: topic, list_title, comparison_title, deep_title, tools, deep_tool.\n"
-                "Constraints:\n"
-                "- All titles must include year 2026.\n"
-                "- list_title: starts with 'Best' and is list-style.\n"
-                "- comparison_title: contains 'vs' and compares exactly 3 tools.\n"
-                "- deep_title: is a deep dive on the FIRST tool (tools[0]) and mentions 'Pricing' or 'Guide'.\n"
-                "- Keep each title <= 75 characters.\n"
-                "- Tools should be realistic SaaS products.\n"
-                "- No quotes in titles.\n"
-            ),
-        },
-        {"role": "user", "content": f"Recent titles to avoid: {avoid}\nGenerate ONE cluster JSON:"},
-    ]
-    raw = call_openai(messages).strip()
-    raw = raw[raw.find("{") : raw.rfind("}") + 1]
-    return json.loads(raw)
-
-def article_prompt_base() -> str:
-    # ✅ 가격은 “구조/포인트”만, 정확한 금액은 절대 금지
-    return (
-        "You are a professional SaaS reviewer writing for small businesses.\n"
-        "Write a detailed SEO article (minimum ~1500 words).\n"
-        "Use clean HTML only (no markdown).\n"
-        "Pricing rules (IMPORTANT):\n"
-        "- Do NOT include exact prices or currency amounts ($, €, £, ₩, numbers like $29, 29/mo, etc.).\n"
-        "- Describe pricing as plan structure (Free / Starter / Pro / Enterprise), limits, and what to verify.\n"
-        "- Use phrases like 'pricing varies' and 'check the official pricing page'.\n"
-        "Include: pros/cons, a comparison table (NO exact prices), who this is for, how we evaluate, disclosure, FAQs.\n"
-        "In the INTRO, add a short note that a save/print-friendly checklist is included at the end using shortcode [rp_intro_checklist_v1].\n"
-        "At the END, include a section titled 'Save / Print Checklist' and include shortcode [rp_save_print_v1].\n"
-        "Avoid overly promotional tone. Be specific and structured.\n"
-    )
-
-def generate_article(title: str, role: str, tools: List[str]) -> str:
+def generate_article(topic: str, kind: str) -> str:
     """
-    role: 'list' | 'comparison' | 'deep'
-    tools: ["A","B","C"]  (deep: A=tools[0], alternatives=B,C)
+    kind: list / comparison / deep
     """
-    A, B, C = tools[0], tools[1], tools[2]
+    if kind == "list":
+        system = f"""
+You are a professional SaaS reviewer writing for small businesses.
+Write a detailed SEO article (minimum 1500 words).
+Include: who it's for, how to choose, key features, practical setup tips.
+Include ONE comparison table (HTML).
+Use clean HTML only.
+Insert placeholders [IMAGE1], [IMAGE2], [IMAGE3] naturally (intro/mid/late).
+{PRICE_GUARD}
+"""
+        user = f"Write about: {topic}"
+    elif kind == "comparison":
+        system = f"""
+You are a professional SaaS reviewer writing for small businesses.
+Write a comparison article (minimum 1500 words) between 3-4 tools.
+Include: decision framework, pros/cons, scenarios, and an HTML comparison table.
+Use clean HTML only.
+Insert placeholders [IMAGE1], [IMAGE2], [IMAGE3] naturally (intro/mid/late).
+{PRICE_GUARD}
+"""
+        user = f"Write a comparison about: {topic}"
+    else:
+        system = f"""
+You are a professional SaaS reviewer writing for small businesses.
+Write a deep-dive single-tool or single-topic guide (minimum 1500 words).
+Include: implementation steps, pitfalls, checklist, FAQs.
+Use clean HTML only.
+Insert placeholders [IMAGE1], [IMAGE2], [IMAGE3] naturally (intro/mid/late).
+{PRICE_GUARD}
+"""
+        user = f"Write a deep guide about: {topic}"
 
-    if role == "list":
-        link_rules = (
-            "Add 2–3 contextual internal links in the body using these placeholders exactly:\n"
-            "- [[LINK_COMP]] once\n"
-            "- [[LINK_DEEP]] once\n"
-            'Format example: <a href="[[LINK_COMP]]">see the full comparison</a>\n'
-        )
-    elif role == "comparison":
-        link_rules = (
-            "Add 2–3 contextual internal links in the body using these placeholders exactly:\n"
-            "- [[LINK_LIST]] once\n"
-            "- [[LINK_DEEP]] once\n"
-        )
-    else:  # deep
-        link_rules = (
-            "Add 2–3 contextual internal links in the body using these placeholders exactly:\n"
-            "- [[LINK_LIST]] once\n"
-            "- [[LINK_COMP]] once\n"
-            "Also include an 'Alternatives' section that links the alternatives to the comparison using placeholders:\n"
-            f'- Mention {B} as <a href="[[ALT_B]]">{B}</a>\n'
-            f'- Mention {C} as <a href="[[ALT_C]]">{C}</a>\n'
-        )
-
-    cluster_context = (
-        "Cluster context:\n"
-        f"- Primary tool (deep dive): {A}\n"
-        f"- Alternatives: {B}, {C}\n"
-    )
-
-    messages = [
-        {"role": "system", "content": article_prompt_base()},
-        {
-            "role": "user",
-            "content": (
-                f"Title: {title}\n"
-                f"{cluster_context}\n"
-                f"{link_rules}\n"
-                "IMPORTANT: Do not include exact currency amounts.\n"
-                "HTML only.\n"
-                "Now write the article:"
-            ),
-        },
-    ]
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     return call_openai(messages)
 
-# ==============================
-# Image placement fix (강제 3곳 삽입)
-# ==============================
-def insert_images_strategic(html: str, blocks: List[str]) -> str:
+# =========================
+# 본문 후처리: 표/Save&Print/가격 제거
+# =========================
+TABLE_CSS_MARKER = "/* rp-table-scroll */"
+SAVEPRINT_MARKER = "<!-- rp:save_print_v1 -->"
+
+PRICE_HIT_RE = re.compile(
+    r"(\$|€|£|₩)\s?\d|"
+    r"\b(pricing|price|billed|annually|monthly|per\s+month|/mo|/month|per\s+year|/yr|per\s+agent|usd|eur|gbp|krw)\b",
+    re.I
+)
+
+def remove_pricing_blocks(html_text: str) -> str:
+    soup = BeautifulSoup(html_text, "lxml")
+    for tag in soup.find_all(["p", "li"]):
+        t = tag.get_text(" ", strip=True)
+        if t and PRICE_HIT_RE.search(t):
+            tag.decompose()
+    for table in soup.find_all("table"):
+        t = table.get_text(" ", strip=True)
+        if t and PRICE_HIT_RE.search(t):
+            table.decompose()
+    for h in soup.find_all(["h2","h3","h4"]):
+        ht = h.get_text(" ", strip=True)
+        if ht and PRICE_HIT_RE.search(ht):
+            nxt = h.find_next_sibling()
+            h.decompose()
+            while nxt and nxt.name not in ["h2","h3","h4"]:
+                kill = nxt
+                nxt = nxt.find_next_sibling()
+                kill.decompose()
+    return str(soup.body.decode_contents() if soup.body else soup)
+
+def wrap_tables_mobile(html_text: str) -> str:
+    soup = BeautifulSoup(html_text, "lxml")
+    for table in soup.find_all("table"):
+        p = table.parent
+        if p and p.name == "div" and "rp-table-scroll" in (p.get("class") or []):
+            continue
+        wrap = soup.new_tag("div")
+        wrap["class"] = "rp-table-scroll"
+        table.wrap(wrap)
+    out = str(soup.body.decode_contents() if soup.body else soup)
+    if TABLE_CSS_MARKER not in out:
+        css = f"""
+<style>
+{TABLE_CSS_MARKER}
+.rp-table-scroll{{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;margin:16px 0;}}
+.rp-table-scroll table{{min-width:680px;}}
+</style>
+"""
+        out = css + out
+    return out
+
+def ensure_save_print(html_text: str) -> str:
+    if SAVEPRINT_MARKER in html_text:
+        return html_text
+    block = "\n".join([
+        SAVEPRINT_MARKER,
+        '<h2 id="save-print">Save or Print Checklist</h2>',
+        '<p><strong>안내:</strong> 이 체크리스트는 <strong>저장 및 출력</strong>이 가능합니다. '
+        '아래 버튼을 누르면 <strong>출력창</strong>이 열립니다. 출력창에서 <strong>"PDF로 저장"</strong>을 선택하면 저장할 수 있어요.</p>',
+        '<p><button onclick="window.print()" style="padding:12px 18px;border-radius:12px;border:1px solid #ccc;cursor:pointer;font-weight:700;">출력창 열기</button></p>',
+    ])
+    return html_text.rstrip() + "\n\n" + block + "\n"
+
+def fill_images(content: str, title: str) -> str:
+    seed = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or str(random.randint(1000,9999))
+    queries = [title, f"{title} software dashboard", f"{title} workflow automation"]
+    urls = []
+    for i, q in enumerate(queries):
+        u = unsplash_url(q) or picsum(f"{seed}-{i+1}")
+        u = upload_image_to_wp(u, f"rp_body_{seed}_{i+1}")
+        urls.append(u)
+
+    img1 = f'<figure class="wp-block-image"><img src="{urls[0]}" alt="{html_mod.escape(title)} image 1" loading="lazy" style="width:100%;border-radius:14px;margin:26px 0;"></figure>'
+    img2 = f'<figure class="wp-block-image"><img src="{urls[1]}" alt="{html_mod.escape(title)} image 2" loading="lazy" style="width:100%;border-radius:14px;margin:26px 0;"></figure>'
+    img3 = f'<figure class="wp-block-image"><img src="{urls[2]}" alt="{html_mod.escape(title)} image 3" loading="lazy" style="width:100%;border-radius:14px;margin:26px 0;"></figure>'
+
+    content = content.replace("[IMAGE1]", img1)
+    content = content.replace("[IMAGE2]", img2)
+    content = content.replace("[IMAGE3]", img3)
+    return content
+
+# =========================
+# 클러스터 토픽 생성
+# =========================
+def cluster_topics_for_category(cat_slug: str) -> List[Tuple[str, str]]:
     """
-    무조건 3개를 '상단/중간/하단'에 분산 삽입.
-    - 상단: 첫 </p> 뒤
-    - 중간: 2번째 <h2> 뒤 (없으면 첫 <h2> 뒤)
-    - 하단: 체크리스트(또는 Conclusion/FAQs) 앞쪽
+    return list of (kind, topic)
     """
-    if not html:
-        return "\n".join(blocks)
-
-    # 기존 이미지가 3장 이상이면 굳이 더 넣지 않음(중복 방지)
-    if len(IMG_TAG_RE.findall(html)) >= 3:
-        return html
-
-    # 1) 상단 삽입
-    top = blocks[0]
-    m = re.search(r"</p\s*>", html, flags=re.I)
-    if m:
-        i = m.end()
-        html = html[:i] + "\n" + top + "\n" + html[i:]
-    else:
-        html = top + "\n" + html
-
-    # 2) 중간 삽입: h2 찾기
-    h2_iter = list(re.finditer(r"<h2\b[^>]*>", html, flags=re.I))
-    mid = blocks[1]
-    if len(h2_iter) >= 2:
-        # 2번째 h2 태그 뒤쪽에 넣기
-        pos = h2_iter[1].start()
-        html = html[:pos] + mid + "\n" + html[pos:]
-    elif len(h2_iter) == 1:
-        pos = h2_iter[0].start()
-        html = html[:pos] + mid + "\n" + html[pos:]
-    else:
-        # h2가 없으면 대충 중간쯤
-        pos = max(0, len(html)//2)
-        html = html[:pos] + "\n" + mid + "\n" + html[pos:]
-
-    # 3) 하단 삽입: 체크리스트/FAQ/Conclusion 앞
-    bot = blocks[2]
-    anchor = re.search(r"<h2\b[^>]*>\s*(Save\s*/\s*Print\s*Checklist|FAQ|FAQs|Conclusion)\b", html, flags=re.I)
-    if anchor:
-        pos = anchor.start()
-        html = html[:pos] + bot + "\n" + html[pos:]
-    else:
-        html = html.rstrip() + "\n" + bot + "\n"
-
-    return html
-
-# ==============================
-# Publish / Update
-# ==============================
-def publish_future_post(
-    title: str, content: str, category_id: int, publish_date: datetime
-) -> Optional[dict]:
-    # 1) 가격 금액 제거 후처리
-    content = sanitize_pricing(content)
-
-    # 2) 이미지 URL 준비 + 강제 분산 삽입
-    u1, u2, u3 = pick_inline_urls(title)
-    blocks = [
-        img_block(u1, f"{title} cover"),
-        img_block(u2, f"{title} example"),
-        img_block(u3, f"{title} workflow"),
+    if cat_slug == "crm-software":
+        return [
+            ("list", "Best CRM Software for Small Businesses (2026)"),
+            ("comparison", "HubSpot vs Salesforce vs Zoho CRM: Which is Better for Small Teams (2026)"),
+            ("deep", "CRM Implementation Checklist for Small Businesses: Steps, Templates, and Pitfalls (2026)"),
+        ]
+    if cat_slug == "automation-tools":
+        return [
+            ("list", "Best Automation Tools for Small Business Workflows (2026)"),
+            ("comparison", "Zapier vs Make vs n8n: Automation Tool Comparison (2026)"),
+            ("deep", "How to Automate Lead Routing and Follow-ups with No-Code Workflows (2026)"),
+        ]
+    if cat_slug == "marketing-ai":
+        return [
+            ("list", "Best AI Marketing Tools for Lead Generation (2026)"),
+            ("comparison", "Best AI Email Marketing Platforms: Automation, Segmentation, Deliverability (2026)"),
+            ("deep", "AI Content Repurposing Workflow for Small Teams: A Step-by-Step Guide (2026)"),
+        ]
+    # ai-productivity
+    return [
+        ("list", "Best AI Productivity Tools for Small Businesses (2026)"),
+        ("comparison", "Notion AI vs ClickUp AI vs Asana AI: Project Management for Small Teams (2026)"),
+        ("deep", "Meeting Notes to Action Items: A Practical AI Workflow for Small Teams (2026)"),
     ]
-    content = insert_images_strategic(content, blocks)
 
-    # 3) 체크리스트 보장
-    if "Save / Print Checklist" not in strip_tags(content):
-        content = content.rstrip() + "\n" + checklist_html() + "\n"
+# =========================
+# 발행 (future 예약)
+# =========================
+def publish_future_post(title: str, content: str, cat_slug: str, publish_date: datetime) -> Optional[int]:
+    cat_id = get_category_id(cat_slug)
+    if not cat_id:
+        print("Category id not found:", cat_slug)
+        return None
 
+    # 1) 일단 포스트 생성 (ID 확보)
     payload = {
         "title": title,
         "content": content,
         "status": "future",
         "date": publish_date.isoformat(),
-        "featured_media": FEATURED_MEDIA_ID,
-        "categories": [category_id],
+        "categories": [cat_id],
     }
-    r = wp_post(WP_POST_URL, payload)
-    print("WP:", r.status_code, "|", title, "->", publish_date.isoformat(), "| cat:", category_id)
-    if r.status_code in (200, 201):
-        return r.json()
-    print(r.text[:600])
-    return None
+    r = wp_post(POSTS_URL, payload)
+    if r.status_code not in (200, 201):
+        print("Post create failed:", r.status_code, r.text[:300])
+        return None
 
-def inject_and_update(post_json: dict, list_url: str, comp_url: str, deep_url: str, tools: List[str]):
-    post_id = post_json["id"]
-    content = post_json["content"]["rendered"]
+    post_id = int(r.json()["id"])
 
-    # placeholder 치환
-    content = content.replace('href="[[LINK_LIST]]"', f'href="{list_url}"')
-    content = content.replace('href="[[LINK_COMP]]"', f'href="{comp_url}"')
-    content = content.replace('href="[[LINK_DEEP]]"', f'href="{deep_url}"')
+    # 2) Featured 썸네일 생성/업로드 후 featured_media 업데이트
+    kw = keyword_from_slug(cat_slug)
+    thumb = make_brand_thumbnail_square(keyword=kw, brand=BRAND_TEXT, footer=FOOTER_TEXT, size=1200)
+    featured_id = upload_png_image(
+        thumb,
+        filename=f"rp_{post_id}_featured_{kw.lower()}.png",
+        title=f"{BRAND_TEXT} - {kw}",
+        alt=f"{BRAND_TEXT} - {kw}",
+    )
+    if featured_id:
+        wp_post(f"{POSTS_URL}/{post_id}", {"featured_media": featured_id})
 
-    # alternatives는 comparison으로 유도
-    content = content.replace('href="[[ALT_B]]"', f'href="{comp_url}"')
-    content = content.replace('href="[[ALT_C]]"', f'href="{comp_url}"')
+    print("Scheduled:", publish_date.isoformat(), "|", cat_slug, "|", title)
+    return post_id
 
-    content = content.replace("[[LINK_LIST]]", list_url)
-    content = content.replace("[[LINK_COMP]]", comp_url)
-    content = content.replace("[[LINK_DEEP]]", deep_url)
-    content = content.replace("[[ALT_B]]", comp_url)
-    content = content.replace("[[ALT_C]]", comp_url)
-
-    # 상단 링크박스 1회 삽입
-    if 'class="rp-related"' not in content:
-        link_block = make_link_block(list_url, comp_url, deep_url)
-        m = re.search(r"</p\s*>", content, flags=re.I)
-        if m:
-            i = m.end()
-            content = content[:i] + "\n" + link_block + "\n" + content[i:]
-        else:
-            content = link_block + "\n" + content
-
-    r = wp_post(f"{WP_POST_URL}/{post_id}", {"content": content})
-    print("Link update:", post_id, r.status_code)
-
-# ==============================
-# Main
-# ==============================
 def main():
-    cats = fetch_categories()
-    if not cats:
-        raise RuntimeError("No categories found. Check WP credentials/permissions or exclusions.")
+    last_future = get_last_scheduled_date()
+    start = max(datetime.now(), last_future) + timedelta(days=DAYS_AHEAD_START)
 
-    recent_titles = fetch_recent_titles()
-    used_times = get_future_dates_set()
-    start_day = datetime.now() + timedelta(days=DAYS_AHEAD_START)
+    used = set()
+    print("Start scheduling from:", start.isoformat())
+    print("Clusters:", CLUSTER_COUNT)
 
-    for cluster_i in range(CLUSTER_COUNT):
-        cat = random.choice(cats)
-        cat_id = int(cat["id"])
-        cat_slug = cat.get("slug", "")
+    for c in range(CLUSTER_COUNT):
+        cat_slug = random.choice(CATEGORY_SLUGS)
+        topics = cluster_topics_for_category(cat_slug)
 
-        plan = gen_cluster_plan(recent_titles)
+        for i, (kind, topic) in enumerate(topics):
+            pub_date = next_available_10am(start + timedelta(days=i + c*3), used)
 
-        list_title = (plan.get("list_title") or "").strip()
-        comp_title = (plan.get("comparison_title") or "").strip()
-        deep_title = (plan.get("deep_title") or "").strip()
-        tools = plan.get("tools") or []
-        if len(tools) != 3 or not list_title or not comp_title or not deep_title:
-            raise RuntimeError(f"Bad cluster plan: {plan}")
+            print("Generating:", kind, "|", topic)
+            article = generate_article(topic, kind)
 
-        for t in (list_title, comp_title, deep_title):
-            recent_titles.add(normalize_title(t))
+            # 후처리
+            article = fill_images(article, topic)
+            article = remove_pricing_blocks(article)
+            article = wrap_tables_mobile(article)
+            article = ensure_save_print(article)
 
-        d1 = next_available_10am(start_day, used_times)
-        d2 = next_available_10am(d1 + timedelta(days=1), used_times)
-        d3 = next_available_10am(d2 + timedelta(days=1), used_times)
-        start_day = d3 + timedelta(days=1)
-
-        print(f"\n[Cluster #{cluster_i+1}] category={cat_slug}({cat_id})")
-        print(" - LIST:", list_title, "=>", d1.date())
-        print(" - COMP:", comp_title, "=>", d2.date())
-        print(" - DEEP:", deep_title, "=>", d3.date())
-        print(" - TOOLS:", tools)
-
-        p1 = publish_future_post(list_title, generate_article(list_title, "list", tools), cat_id, d1)
-        p2 = publish_future_post(comp_title, generate_article(comp_title, "comparison", tools), cat_id, d2)
-        p3 = publish_future_post(deep_title, generate_article(deep_title, "deep", tools), cat_id, d3)
-
-        if not (p1 and p2 and p3):
-            print("Cluster publish failed; skipping link update.")
-            continue
-
-        list_url = p1.get("link")
-        comp_url = p2.get("link")
-        deep_url = p3.get("link")
-        if not (list_url and comp_url and deep_url):
-            print("Missing post links; skipping link update.")
-            continue
-
-        inject_and_update(p1, list_url, comp_url, deep_url, tools)
-        inject_and_update(p2, list_url, comp_url, deep_url, tools)
-        inject_and_update(p3, list_url, comp_url, deep_url, tools)
+            publish_future_post(topic, article, cat_slug, pub_date)
 
 if __name__ == "__main__":
     main()
