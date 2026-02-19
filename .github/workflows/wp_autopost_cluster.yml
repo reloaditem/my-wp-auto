@@ -2,23 +2,15 @@ name: wp_autopost_cluster
 
 on:
   workflow_dispatch:
-    inputs:
-      cluster_count:
-        description: "How many clusters (each cluster = 3 posts)"
-        required: true
-        default: "1"
-      days_ahead_start:
-        description: "Start scheduling from N days ahead"
-        required: true
-        default: "0"
-
   schedule:
-    - cron: "0 0 * * 1"  # 월요일 KST 09:00 실행 (월/화/수 예약)
-    - cron: "0 0 * * 4"  # 목요일 KST 09:00 실행 (목/금/토 예약)
+    - cron: "0 5 * * 1"  # 월 KST 14:00 (UTC 05:00)
+    - cron: "0 5 * * 4"  # 목 KST 14:00 (UTC 05:00)
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +21,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install requests openai
+          pip install -r requirements.txt
 
       - name: Run cluster autopost
         env:
@@ -40,23 +32,22 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: "gpt-4o-mini"
 
-          # 공통 featured(썸네일)
-          FEATURED_MEDIA_ID: "332"
-
-          # 본문 이미지 3장(있으면 Unsplash, 없으면 picsum)
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
 
           POST_HOUR: "10"
           POST_MINUTE: "0"
 
-          CLUSTER_COUNT: ${{ github.event.inputs.cluster_count }}
-          DAYS_AHEAD_START: ${{ github.event.inputs.days_ahead_start }}
-
-          # 원하면 제외할 카테고리 슬러그(예: uncategorized)
-          # EXCLUDE_CATEGORY_SLUGS: "uncategorized"
-          ALLOWED_WEEKDAYS: "0,1,2,3,4,5"
-          
+          # 빈값 문제 방지(이전 오류 해결)
           DAYS_AHEAD_START: "1"
-          DAYS_AHEAD_END: "21"
+
+          # 월화수 / 목금토를 만들기 위해
+          # 월/목에 각 1클러스터(=3글)씩 생성
+          CLUSTER_COUNT: "1"
+
+          # 일요일 스킵
+          ALLOWED_WEEKDAYS: "0,1,2,3,4,5"
+
+          BRAND_TEXT: "RELOADITEM"
+          FOOTER_TEXT: "AI TOOLS"
         run: |
           python scripts/wp_autopost_cluster.py
