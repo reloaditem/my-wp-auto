@@ -1,3 +1,5 @@
-requests
-pillow
-python-dateutil
+requests==2.32.3
+python-slugify==8.0.4
+pillow==10.4.0
+beautifulsoup4==4.12.3
+lxml==5.2.2
