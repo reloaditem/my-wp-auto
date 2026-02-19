@@ -4,6 +4,7 @@ import random
 import requests
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Tuple
+import html as html_mod
 from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
 from openai import OpenAI
