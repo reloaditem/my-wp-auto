@@ -1,130 +1,125 @@
 import os
 import re
-import io
+import math
 import html as html_mod
-import random
 import requests
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, List, Dict, Tuple
 from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
+import io
 
 # =========================
-# ENV (레포 시크릿명 그대로)
+# ENV (너가 쓰는 시크릿 이름 기준)
 # =========================
 WP_BASE = os.environ.get("WP_BASE", "").rstrip("/")
 WP_USER = os.environ.get("WP_USER", "")
 WP_PASS = os.environ.get("WP_PASS", "")
 
-UNSPLASH_ACCESS_KEY = (os.environ.get("UNSPLASH_ACCESS_KEY") or "").strip()
+THUMB_BG_MEDIA_ID = int(os.environ.get("THUMB_BG_MEDIA_ID", "332"))  # 네가 올린 공통 배경
+SITE_BRAND = os.environ.get("SITE_BRAND", "ReloadItem")              # 썸네일 상단 브랜드
 
-# 대상: 공개 + 예약글
-TARGET_STATUSES = [s.strip() for s in (os.environ.get("TARGET_STATUSES") or "publish,future").split(",") if s.strip()]
-PER_STATUS_LIMIT = int((os.environ.get("PER_STATUS_LIMIT") or "50").strip())
-DRY_RUN = (os.environ.get("DRY_RUN") or "0").strip() == "1"
+# 유지/수정 범위
+POST_LIMIT = int(os.environ.get("POST_LIMIT", "50"))                 # 한번에 처리할 글 수
+INCLUDE_FUTURE = os.environ.get("INCLUDE_FUTURE", "1") == "1"        # 예약글 포함
 
-# Featured 썸네일 생성(브랜드 통일)
-BRAND_TEXT = (os.environ.get("BRAND_TEXT") or "RELOADITEM").strip()
-FOOTER_TEXT = (os.environ.get("FOOTER_TEXT") or "AI TOOLS").strip()
+# 가격 표기 제거(PartnerStack 대비)
+REMOVE_PRICING = os.environ.get("REMOVE_PRICING", "1") == "1"
 
-# 내부 이미지 3장
-ADD_BODY_IMAGES = (os.environ.get("ADD_BODY_IMAGES") or "1").strip() == "1"
-UPLOAD_BODY_IMAGES_TO_WP = (os.environ.get("UPLOAD_BODY_IMAGES_TO_WP") or "1").strip() == "1"
+# 본문 이미지(이미지 3개)는 cluster에서 넣는 게 메인.
+# maintain에서는 "RP 잔재 제거 + 가격 제거 + 표 모바일 대응 class" 위주로만.
+FIX_TABLES = True
 
-# =========================
-# WP REST
-# =========================
-AUTH = HTTPBasicAuth(WP_USER, WP_PASS)
-WP_API = f"{WP_BASE}/wp-json/wp/v2"
-POSTS_URL = f"{WP_API}/posts"
-MEDIA_URL = f"{WP_API}/media"
-CATS_URL = f"{WP_API}/categories"
+auth = HTTPBasicAuth(WP_USER, WP_PASS)
 
-if not (WP_BASE and WP_USER and WP_PASS):
-    raise SystemExit("Missing env: WP_BASE, WP_USER, WP_PASS")
+def wp_get(url: str, params: dict = None) -> requests.Response:
+    return requests.get(url, params=params, auth=auth, timeout=60)
 
-# =========================
-# Regex 정리 / 금액 제거
-# =========================
-RP_TOKEN_RE = re.compile(r"\brp:[A-Za-z0-9_:-]+\b")
-JUST_Q_RE = re.compile(r"^\s*\?\s*$", re.MULTILINE)
+def wp_post(url: str, json: dict = None, files=None, headers=None) -> requests.Response:
+    return requests.post(url, json=json, files=files, headers=headers, auth=auth, timeout=120)
 
-# Pricing 제거: PartnerStack 안전하게 "정확 금액" 싹 걷어냄
-PRICE_HIT_RE = re.compile(
-    r"(\$|€|£|₩)\s?\d|"
-    r"\b(pricing|price|billed|annually|monthly|per\s+month|/mo|/month|per\s+year|/yr|per\s+agent|usd|eur|gbp|krw)\b",
-    re.I
-)
+def wp_put(url: str, json: dict = None) -> requests.Response:
+    return requests.post(url, json=json, auth=auth, timeout=60)
 
-# 표 래핑 마커
-TABLE_CSS_MARKER = "/* rp-table-scroll */"
-SAVEPRINT_MARKER = "<!-- rp:save_print_v1 -->"
-IMAGES_MARKER = "<!-- rp:body_images_v1 -->"
+def must_env():
+    missing = []
+    for k in ["WP_BASE", "WP_USER", "WP_PASS"]:
+        if not os.environ.get(k):
+            missing.append(k)
+    if missing:
+        raise SystemExit(f"Missing env: {', '.join(missing)}")
 
-def wp_get(url: str, params: Optional[dict] = None):
-    r = requests.get(url, params=params, auth=AUTH, timeout=60)
-    return r
-
-def wp_post(url: str, json_data: dict):
-    r = requests.post(url, json=json_data, auth=AUTH, timeout=90)
-    return r
-
-def wp_upload_image_bytes(filename: str, image_bytes: bytes, mime: str = "image/jpeg") -> Optional[dict]:
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
-        "Content-Type": mime,
-    }
-    r = requests.post(MEDIA_URL, headers=headers, data=image_bytes, auth=AUTH, timeout=120)
-    if r.status_code in (200, 201):
-        return r.json()
-    return None
-
-def fetch_categories_map() -> Dict[int, str]:
-    out = {}
-    page = 1
-    while True:
-        r = wp_get(CATS_URL, params={"per_page": 100, "page": page})
-        if r.status_code != 200:
-            break
-        batch = r.json() or []
-        if not batch:
-            break
-        for c in batch:
-            out[c["id"]] = c.get("slug") or c.get("name") or ""
-        if len(batch) < 100:
-            break
-        page += 1
-    return out
-
-def fetch_posts(status: str, limit: int) -> List[dict]:
-    # per_page max 100
-    r = wp_get(POSTS_URL, params={"status": status, "per_page": min(limit, 100), "orderby": "date", "order": "desc"})
+def fetch_media_source_url(media_id: int) -> Optional[str]:
+    r = wp_get(f"{WP_BASE}/wp-json/wp/v2/media/{media_id}")
     if r.status_code != 200:
-        print("Fetch failed:", status, r.status_code, r.text[:200])
-        return []
-    return r.json() or []
+        return None
+    data = r.json()
+    return data.get("source_url")
 
-# =========================
-# 썸네일 생성 (블랙+골드)
-# =========================
-def _get_font(size: int, bold: bool = True):
-    # pillow default font fallback
+def download_bytes(url: str) -> Optional[bytes]:
     try:
-        from PIL import ImageFont
-        p = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-        if os.path.exists(p):
-            return ImageFont.truetype(p, size=size)
-        return ImageFont.load_default()
+        r = requests.get(url, timeout=60)
+        if r.status_code != 200:
+            return None
+        return r.content
     except Exception:
         return None
 
-def _wrap_lines(draw, text: str, font, max_width: int, max_lines: int = 2):
-    words = re.sub(r"\s+", " ", text.strip()).split(" ")
-    lines, cur = [], ""
+def safe_ascii_category(cat: str) -> str:
+    # 한글 카테고리면 썸네일 폰트 깨질 수 있어서 ascii만 남기거나 비움
+    # (너가 원하면 나중에 NotoSansKR 폰트 파일을 repo에 넣고 해결 가능)
+    if not cat:
+        return ""
+    if re.search(r"[^\x00-\x7F]", cat):
+        return ""
+    return cat.strip()
+
+def make_featured_image(bg_bytes: bytes, title: str, category: str) -> bytes:
+    # 1200x630 (OG/썸네일 안정)
+    img = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
+    img = img.resize((1200, 630))
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(overlay)
+
+    # 중앙 패널
+    panel_margin = 90
+    panel = (panel_margin, 140, 1200 - panel_margin, 630 - 140)
+    d.rounded_rectangle(panel, radius=26, fill=(0, 0, 0, 160), outline=(212, 175, 55, 200), width=3)
+
+    # 상/하단 골드 라인
+    d.line((panel[0] + 30, panel[1] + 28, panel[2] - 30, panel[1] + 28), fill=(212, 175, 55, 220), width=3)
+    d.line((panel[0] + 30, panel[3] - 28, panel[2] - 30, panel[3] - 28), fill=(212, 175, 55, 220), width=3)
+
+    img = Image.alpha_composite(img, overlay)
+    d = ImageDraw.Draw(img)
+
+    # 폰트(환경에 기본 포함된 DejaVu 사용)
+    try:
+        font_title = ImageFont.truetype("DejaVuSans.ttf", 54)
+        font_meta = ImageFont.truetype("DejaVuSans.ttf", 26)
+        font_brand = ImageFont.truetype("DejaVuSans.ttf", 28)
+    except Exception:
+        font_title = ImageFont.load_default()
+        font_meta = ImageFont.load_default()
+        font_brand = ImageFont.load_default()
+
+    cat = safe_ascii_category(category)
+    # 상단 텍스트
+    d.text((panel[0] + 40, panel[1] + 45), SITE_BRAND, fill=(255, 255, 255, 235), font=font_brand)
+    if cat:
+        d.text((panel[2] - 40 - d.textlength(cat, font=font_meta), panel[1] + 52), cat, fill=(212, 175, 55, 235), font=font_meta)
+
+    # 타이틀 줄바꿈
+    t = title.strip()
+    max_w = panel[2] - panel[0] - 80
+    words = t.split()
+    lines = []
+    cur = ""
     for w in words:
         test = (cur + " " + w).strip()
-        if draw.textlength(test, font=font) <= max_width:
+        if d.textlength(test, font=font_title) <= max_w:
             cur = test
         else:
             if cur:
@@ -132,350 +127,154 @@ def _wrap_lines(draw, text: str, font, max_width: int, max_lines: int = 2):
             cur = w
     if cur:
         lines.append(cur)
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        last = lines[-1]
-        while draw.textlength(last + "…", font=font) > max_width and len(last) > 0:
-            last = last[:-1].rstrip()
-        lines[-1] = (last + "…") if last else "…"
-    return lines
+    lines = lines[:3]  # 3줄까지만 (모바일 썸네일 잘림 방지)
 
-def make_brand_thumbnail_square(keyword: str, brand: str, footer: str, size: int = 1200) -> Image.Image:
-    from PIL import ImageDraw
-    W = H = size
-    img = Image.new("RGB", (W, H), (10, 10, 12))  # matte black
-    draw = ImageDraw.Draw(img)
+    y = panel[1] + 125
+    for line in lines:
+        d.text((panel[0] + 40, y), line, fill=(255, 255, 255, 245), font=font_title)
+        y += 68
 
-    gold = (198, 154, 68)
-    off = (245, 245, 245)
+    # 하단 도메인
+    domain = re.sub(r"^https?://", "", WP_BASE).split("/")[0]
+    d.text((panel[0] + 40, panel[3] - 80), domain, fill=(255, 255, 255, 200), font=font_meta)
 
-    pad = int(W * 0.05)
-    frame_w = max(3, int(W * 0.006))
-    draw.rounded_rectangle((pad, pad, W-pad, H-pad), radius=int(W*0.03), outline=gold, width=frame_w)
+    out = io.BytesIO()
+    img.convert("RGB").save(out, format="JPEG", quality=92, optimize=True)
+    return out.getvalue()
 
-    pad2 = pad + int(W * 0.02)
-    draw.rounded_rectangle((pad2, pad2, W-pad2, H-pad2), radius=int(W*0.028), outline=(70, 70, 78), width=max(2, frame_w//2))
-
-    header_font = _get_font(int(W * 0.06), bold=True)
-    footer_font = _get_font(int(W * 0.045), bold=False)
-
-    hx = pad2 + int(W*0.03)
-    hy = pad2 + int(H*0.06)
-    draw.text((hx, hy), brand.upper(), font=header_font, fill=off)
-
-    line_y = hy + int(W*0.09)
-    draw.line((hx, line_y, W - pad2 - int(W*0.03), line_y), fill=gold, width=max(3, int(W*0.004)))
-
-    kw = (keyword or "AI TOOLS").upper()
-    max_width = W - 2*(pad2 + int(W*0.05))
-    kw_font = _get_font(int(W*0.13), bold=True)
-    lines = _wrap_lines(draw, kw, kw_font, max_width, max_lines=2)
-
-    # 폰트가 너무 크면 줄바꿈 후 폭 초과 가능 → 간단히 축소
-    while True:
-        too_wide = any(draw.textlength(ln, font=kw_font) > max_width for ln in lines)
-        if not too_wide:
-            break
-        kw_font = _get_font(max(28, kw_font.size - 4), bold=True)
-        lines = _wrap_lines(draw, kw, kw_font, max_width, max_lines=2)
-        if kw_font.size <= 28:
-            break
-
-    line_h = int(kw_font.size * 1.12)
-    total_h = line_h * len(lines)
-    start_y = int(H*0.50) - total_h//2
-
-    for i, ln in enumerate(lines):
-        lw = draw.textlength(ln, font=kw_font)
-        x = (W - lw)//2
-        y = start_y + i*line_h
-        draw.text((x+2, y+2), ln, font=kw_font, fill=(0, 0, 0))
-        draw.text((x, y), ln, font=kw_font, fill=gold)
-
-    ft = footer.upper()
-    fw = draw.textlength(ft, font=footer_font)
-    fx = (W - fw)//2
-    fy = H - pad2 - int(H*0.10)
-    draw.text((fx, fy), ft, font=footer_font, fill=off)
-    return img
-
-def upload_png_image(img: Image.Image, filename: str, title: str, alt: str) -> Optional[int]:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    buf.seek(0)
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    r = requests.post(MEDIA_URL, headers=headers, data=buf.getvalue(), auth=AUTH, timeout=120)
-    if r.status_code not in (200, 201):
-        print("Media upload failed:", r.status_code, r.text[:200])
-        return None
-    media_id = int(r.json()["id"])
-    # alt/title set
-    requests.post(f"{MEDIA_URL}/{media_id}", json={"title": title, "alt_text": alt}, auth=AUTH, timeout=60)
-    return media_id
-
-def keyword_from_category_slug(slug: str) -> str:
-    m = {
-        "crm-software": "CRM",
-        "automation-tools": "AUTOMATION",
-        "marketing-ai": "MARKETING",
-        "ai-productivity": "PRODUCTIVITY",
+def upload_media(image_bytes: bytes, filename: str) -> int:
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Type": "image/jpeg",
     }
-    return m.get(slug, "AI TOOLS")
+    r = requests.post(
+        f"{WP_BASE}/wp-json/wp/v2/media",
+        data=image_bytes,
+        headers=headers,
+        auth=auth,
+        timeout=120,
+    )
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Media upload failed: {r.status_code} {r.text[:300]}")
+    return r.json()["id"]
 
-# =========================
-# 본문 이미지(주제 기반)
-# =========================
-def picsum(seed: str, w: int = 1200, h: int = 800) -> str:
-    return f"https://picsum.photos/seed/{seed}/{w}/{h}"
-
-def unsplash_url(query: str) -> Optional[str]:
-    if not UNSPLASH_ACCESS_KEY:
-        return None
-    api = "https://api.unsplash.com/photos/random"
-    params = {"query": query, "orientation": "landscape", "client_id": UNSPLASH_ACCESS_KEY}
-    r = requests.get(api, params=params, timeout=30)
-    if r.status_code == 200:
-        return (r.json().get("urls") or {}).get("regular")
-    return None
-
-def download_image(url: str) -> Optional[Tuple[bytes, str]]:
-    r = requests.get(url, timeout=60)
+def get_category_name(post: dict) -> str:
+    # WP REST에서 categories는 ID 배열. 이름 얻으려면 별도 호출.
+    cats = post.get("categories") or []
+    if not cats:
+        return ""
+    cid = cats[0]
+    r = wp_get(f"{WP_BASE}/wp-json/wp/v2/categories/{cid}")
     if r.status_code != 200:
-        return None
-    ctype = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
-    return r.content, ctype
+        return ""
+    return r.json().get("name", "")
 
-def build_body_image_urls(title: str) -> List[str]:
-    seed = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or str(random.randint(1000,9999))
-    queries = [title, f"{title} software dashboard", f"{title} workflow automation"]
-    urls = []
-    for i, q in enumerate(queries):
-        u = unsplash_url(q) or picsum(f"{seed}-{i+1}")
-        urls.append(u)
-    return urls
+def strip_pricing(text: str) -> str:
+    if not REMOVE_PRICING:
+        return text
 
-def upload_or_use(url: str, filename_prefix: str) -> str:
-    if not UPLOAD_BODY_IMAGES_TO_WP:
-        return url
-    dl = download_image(url)
-    if not dl:
-        return url
-    b, ctype = dl
-    ext = "jpg" if "jpeg" in ctype else ("png" if "png" in ctype else "jpg")
-    up = wp_upload_image_bytes(f"{filename_prefix}.{ext}", b, ctype)
-    if up and up.get("source_url"):
-        return up["source_url"]
-    return url
+    # $xx, xx/mo, per month 등 가격/요금 표현 라인 제거
+    lines = text.splitlines()
+    out = []
+    price_pat = re.compile(r"(\$\s?\d+|\d+\s?\/\s?mo|\bper\s+month\b|\bmonthly\b|\bPricing\b:)", re.I)
+    for ln in lines:
+        if price_pat.search(ln):
+            continue
+        out.append(ln)
+    text2 = "\n".join(out)
 
-# =========================
-# 콘텐츠 수정 로직
-# =========================
-def remove_rp_and_artifacts(html_text: str) -> str:
-    html_text = RP_TOKEN_RE.sub("", html_text)
-    html_text = JUST_Q_RE.sub("", html_text)
-    html_text = re.sub(r"\n{3,}", "\n\n", html_text)
+    # 표 내부의 $ 제거(완전 삭제)
+    text2 = re.sub(r"\$\s?\d+(\.\d+)?", "", text2)
+    return text2
+
+def clean_rp_markers(html_text: str) -> str:
+    # 과거 rp:xxx 텍스트로 박힌 것 / 또는 주석 형태 제거
+    html_text = re.sub(r"\brp:[a-zA-Z0-9_\-]+\b", "", html_text)
+    html_text = re.sub(r"<!--\s*rp:[^>]+-->", "", html_text)
     return html_text
 
-def remove_pricing(html_text: str) -> str:
-    soup = BeautifulSoup(html_text, "lxml")
-
-    # 문단/리스트에서 가격 히트면 제거
-    for tag in soup.find_all(["p", "li"]):
-        t = tag.get_text(" ", strip=True)
-        if t and PRICE_HIT_RE.search(t):
-            tag.decompose()
-
-    # 가격 언급된 표 제거
+def fix_tables(html_text: str) -> str:
+    if not FIX_TABLES:
+        return html_text
+    # table에 wrapper class를 넣기 (CSS는 WP쪽에 추가)
+    soup = BeautifulSoup(html_text, "html.parser")
     for table in soup.find_all("table"):
-        t = table.get_text(" ", strip=True)
-        if t and PRICE_HIT_RE.search(t):
-            table.decompose()
-
-    # "Pricing" 헤딩 섹션 제거
-    for h in soup.find_all(["h2", "h3", "h4"]):
-        ht = h.get_text(" ", strip=True)
-        if ht and PRICE_HIT_RE.search(ht):
-            nxt = h.find_next_sibling()
-            h.decompose()
-            while nxt and nxt.name not in ["h2", "h3", "h4"]:
-                kill = nxt
-                nxt = nxt.find_next_sibling()
-                kill.decompose()
-
-    return str(soup.body.decode_contents() if soup.body else soup)
-
-def wrap_tables_mobile(html_text: str) -> str:
-    soup = BeautifulSoup(html_text, "lxml")
-    for table in soup.find_all("table"):
-        p = table.parent
-        if p and p.name == "div" and "rp-table-scroll" in (p.get("class") or []):
+        # 이미 wrapper가 있으면 스킵
+        parent = table.parent
+        if parent and parent.name == "div" and "ri-table" in (parent.get("class") or []):
             continue
-        wrap = soup.new_tag("div")
-        wrap["class"] = "rp-table-scroll"
-        table.wrap(wrap)
-    out = str(soup.body.decode_contents() if soup.body else soup)
+        wrapper = soup.new_tag("div")
+        wrapper["class"] = ["ri-table"]
+        table.wrap(wrapper)
+        table["class"] = list(set((table.get("class") or []) + ["ri-table__table"]))
+    return str(soup)
 
-    if TABLE_CSS_MARKER not in out:
-        css = f"""
-<style>
-{TABLE_CSS_MARKER}
-.rp-table-scroll{{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;margin:16px 0;}}
-.rp-table-scroll table{{min-width:680px;}}
-</style>
-"""
-        out = css + out
-    return out
-
-def ensure_save_print(html_text: str) -> str:
-    if SAVEPRINT_MARKER in html_text:
-        return html_text
-    if re.search(r"id=[\"']save-print[\"']", html_text, flags=re.I):
-        return SAVEPRINT_MARKER + "\n" + html_text
-    block = "\n".join([
-        SAVEPRINT_MARKER,
-        '<h2 id="save-print">Save or Print Checklist</h2>',
-        '<p><strong>안내:</strong> 이 체크리스트는 <strong>저장 및 출력</strong>이 가능합니다. '
-        '아래 버튼을 누르면 <strong>출력창</strong>이 열립니다. 출력창에서 <strong>"PDF로 저장"</strong>을 선택하면 저장할 수 있어요.</p>',
-        '<p><button onclick="window.print()" style="padding:12px 18px;border-radius:12px;border:1px solid #ccc;cursor:pointer;font-weight:700;">출력창 열기</button></p>',
-    ])
-    return html_text.rstrip() + "\n\n" + block + "\n"
-
-def insert_body_images(html_text: str, title: str) -> str:
-    if not ADD_BODY_IMAGES:
-        return html_text
-    if IMAGES_MARKER in html_text:
-        return html_text
-
-    soup = BeautifulSoup(html_text, "lxml")
-    # 이미 이미지가 3개 이상이면 마커만 추가(중복 방지)
-    if len(soup.find_all("img")) >= 3:
-        return IMAGES_MARKER + "\n" + html_text
-
-    urls = build_body_image_urls(title)
-    final_urls = []
-    for i, u in enumerate(urls):
-        final_urls.append(upload_or_use(u, f"rp_body_{re.sub(r'[^a-z0-9]+','-',title.lower())[:24]}_{i+1}"))
-
-    tags = [
-        f'<figure class="wp-block-image"><img src="{final_urls[0]}" alt="{html_mod.escape(title)} image 1" loading="lazy" style="width:100%;border-radius:14px;margin:26px 0;"></figure>',
-        f'<figure class="wp-block-image"><img src="{final_urls[1]}" alt="{html_mod.escape(title)} image 2" loading="lazy" style="width:100%;border-radius:14px;margin:26px 0;"></figure>',
-        f'<figure class="wp-block-image"><img src="{final_urls[2]}" alt="{html_mod.escape(title)} image 3" loading="lazy" style="width:100%;border-radius:14px;margin:26px 0;"></figure>',
-    ]
-
-    # 삽입 위치: 상/중/하
-    # 상: 첫 h2 앞(없으면 첫 p 뒤)
-    h2 = soup.find(["h2", "h3"])
-    if h2:
-        h2.insert_before(BeautifulSoup(tags[0], "lxml"))
-    else:
-        p = soup.find("p")
-        if p:
-            p.insert_after(BeautifulSoup(tags[0], "lxml"))
-        else:
-            soup.append(BeautifulSoup(tags[0], "lxml"))
-
-    # 중: 55% 지점
-    blocks = soup.find_all(["p", "h2", "h3", "ul", "ol", "table", "blockquote"])
-    if blocks:
-        mid = blocks[min(len(blocks)-1, int(len(blocks)*0.55))]
-        mid.insert_before(BeautifulSoup(tags[1], "lxml"))
-
-    # 하: conclusion/faq 앞(없으면 82% 지점)
-    target = None
-    for h in soup.find_all(["h2","h3","h4"]):
-        t = h.get_text(" ", strip=True).lower()
-        if "conclusion" in t or "faq" in t or "faqs" in t:
-            target = h
+def list_posts(status: str, per_page: int = 50) -> List[dict]:
+    posts = []
+    page = 1
+    while True:
+        r = wp_get(f"{WP_BASE}/wp-json/wp/v2/posts", params={"status": status, "per_page": per_page, "page": page})
+        if r.status_code != 200:
             break
-    if target:
-        target.insert_before(BeautifulSoup(tags[2], "lxml"))
-    else:
-        blocks = soup.find_all(["p", "h2", "h3", "ul", "ol", "table", "blockquote"])
-        if blocks:
-            end = blocks[min(len(blocks)-1, int(len(blocks)*0.82))]
-            end.insert_before(BeautifulSoup(tags[2], "lxml"))
-        else:
-            soup.append(BeautifulSoup(tags[2], "lxml"))
+        batch = r.json()
+        if not batch:
+            break
+        posts.extend(batch)
+        if len(batch) < per_page:
+            break
+        page += 1
+        if len(posts) >= POST_LIMIT:
+            break
+    return posts[:POST_LIMIT]
 
-    out = str(soup.body.decode_contents() if soup.body else soup)
-    return IMAGES_MARKER + "\n" + out
-
-def update_post(post_id: int, content: str, featured_media: Optional[int]) -> bool:
-    payload = {"content": content}
-    if featured_media is not None:
-        payload["featured_media"] = featured_media
-
-    if DRY_RUN:
-        print("[DRY_RUN] update post:", post_id, "featured:", bool(featured_media))
-        return True
-
-    r = wp_post(f"{POSTS_URL}/{post_id}", payload)
+def update_post(post_id: int, payload: dict):
+    r = wp_put(f"{WP_BASE}/wp-json/wp/v2/posts/{post_id}", json=payload)
     if r.status_code not in (200, 201):
-        print("Update failed:", post_id, r.status_code, r.text[:300])
-        return False
-    return True
+        raise RuntimeError(f"Post update failed: {post_id} {r.status_code} {r.text[:300]}")
 
 def main():
-    print("WP_BASE:", WP_BASE)
-    print("TARGET_STATUSES:", TARGET_STATUSES, "PER_STATUS_LIMIT:", PER_STATUS_LIMIT, "DRY_RUN:", DRY_RUN)
+    must_env()
 
-    cat_map = fetch_categories_map()
+    bg_url = fetch_media_source_url(THUMB_BG_MEDIA_ID)
+    if not bg_url:
+        raise SystemExit(f"Cannot fetch background media source_url for id={THUMB_BG_MEDIA_ID}")
+    bg_bytes = download_bytes(bg_url)
+    if not bg_bytes:
+        raise SystemExit("Cannot download background image bytes")
 
-    total = 0
-    ok = 0
+    statuses = ["publish"]
+    if INCLUDE_FUTURE:
+        statuses.append("future")
 
-    for status in TARGET_STATUSES:
-        posts = fetch_posts(status, PER_STATUS_LIMIT)
-        print(f"\n== {status}: {len(posts)} posts ==")
+    all_posts = []
+    for st in statuses:
+        all_posts.extend(list_posts(st))
 
-        for p in posts:
-            total += 1
-            post_id = int(p.get("id"))
-            title = (p.get("title") or {}).get("rendered") or ""
-            content = (p.get("content") or {}).get("rendered") or ""
+    print(f"Found posts: {len(all_posts)}")
 
-            cats = p.get("categories") or []
-            cat_slug = cat_map.get(cats[0], "ai-tools") if cats else "ai-tools"
-            keyword = keyword_from_category_slug(cat_slug)
+    for p in all_posts:
+        pid = p["id"]
+        title = (p.get("title") or {}).get("rendered", "").strip()
+        content = (p.get("content") or {}).get("rendered", "")
 
-            orig = content
+        # 1) 본문 정리
+        new_content = content
+        new_content = clean_rp_markers(new_content)
+        new_content = strip_pricing(new_content)
+        new_content = fix_tables(new_content)
 
-            # 1) rp/이상문자
-            content = remove_rp_and_artifacts(content)
+        # 2) Featured 이미지: "고정 ID"가 아니라 글마다 생성해 업로드 → featured_media로 세팅
+        cat_name = get_category_name(p)
+        thumb_bytes = make_featured_image(bg_bytes, html_mod.unescape(title), cat_name)
+        media_id = upload_media(thumb_bytes, f"thumb_{pid}.jpg")
 
-            # 2) 가격 제거
-            content = remove_pricing(content)
+        payload = {
+            "content": new_content,
+            "featured_media": media_id,
+        }
 
-            # 3) 표 모바일 래핑 + CSS
-            content = wrap_tables_mobile(content)
-
-            # 4) 본문 이미지 3장(썸네일 재사용 X)
-            content = insert_body_images(content, BeautifulSoup(title, "lxml").get_text())
-
-            # 5) Save/Print 섹션 보장
-            content = ensure_save_print(content)
-
-            # 6) Featured 썸네일 생성(블랙+골드 브랜드 통일)
-            featured_id = None
-            thumb = make_brand_thumbnail_square(keyword=keyword, brand=BRAND_TEXT, footer=FOOTER_TEXT, size=1200)
-            featured_id = upload_png_image(
-                thumb,
-                filename=f"rp_{post_id}_featured_{keyword.lower()}.png",
-                title=f"{BRAND_TEXT} - {keyword}",
-                alt=f"{BRAND_TEXT} - {keyword}",
-            )
-
-            changed = (content != orig) or (featured_id is not None)
-            if not changed:
-                print("No change:", post_id, title[:70])
-                ok += 1
-                continue
-
-            print("Updating:", post_id, "|", title[:80], "| kw:", keyword)
-            if update_post(post_id, content, featured_id):
-                ok += 1
-
-    print(f"\nDONE {ok}/{total}")
+        update_post(pid, payload)
+        print(f"Updated post {pid} | featured_media={media_id}")
 
 if __name__ == "__main__":
     main()
