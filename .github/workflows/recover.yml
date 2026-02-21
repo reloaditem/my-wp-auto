@@ -1,0 +1,33 @@
+name: Recover Broken Posts
+
+on:
+  workflow_dispatch:   # 수동 실행 버튼
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 openai
+
+      - name: Run recovery (DRY RUN first)
+        env:
+          WP_BASE: ${{ secrets.WP_BASE }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASS: ${{ secrets.WP_PASS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DRY_RUN: "1"
+          MAX_FIX: "50"
+          AFTER_DATE_KST: "2026-02-12"
+        run: |
+          python scripts/recover_regenerate_with_backup_since_2026-02-12.py
