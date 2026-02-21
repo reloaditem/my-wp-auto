@@ -78,6 +78,19 @@ AFTER_DATE_KST = os.environ.get("AFTER_DATE_KST", "2026-02-12").strip()
 
 INTERNAL_LINKS = int(os.environ.get("INTERNAL_LINKS", "3"))
 BODY_IMAGE_COUNT = int(os.environ.get("BODY_IMAGE_COUNT", "3"))
+
+def get_image_target_by_category(category_name: str) -> int:
+    """Return desired body image count for a post based on category name."""
+    base = BODY_IMAGE_COUNT
+    if not category_name:
+        return base
+    name = category_name.lower()
+    if "automation" in name:
+        return 4
+    if "marketing" in name:
+        return 3
+    return base
+
 TITLE_MATCH_MIN = float(os.environ.get("TITLE_MATCH_MIN", "0.25"))
 
 MODEL = os.environ.get("MODEL", "gpt-4.1-mini")
@@ -210,7 +223,7 @@ def _body_image_count(html_text: str) -> int:
     soup = BeautifulSoup(html_text or "", "html.parser")
     return len(soup.find_all("img"))
 
-def should_fix_post(title_html: str, content_html: str) -> Dict[str, bool]:
+def should_fix_post(title_html: str, content_html: str, category_name: str) -> Dict[str, bool]:
     flags = {"short": False, "stub": False, "title_mismatch": False, "few_images": False}
     words = _plain_words(content_html)
     imgc = _body_image_count(content_html)
@@ -221,7 +234,8 @@ def should_fix_post(title_html: str, content_html: str) -> Dict[str, bool]:
         flags["stub"] = True
     if _title_coverage_score(title_html, content_html) < TITLE_MATCH_MIN:
         flags["title_mismatch"] = True
-    if imgc < BODY_IMAGE_COUNT:
+    target_images = get_image_target_by_category(category_name)
+    if imgc < target_images:
         flags["few_images"] = True
 
     return flags
