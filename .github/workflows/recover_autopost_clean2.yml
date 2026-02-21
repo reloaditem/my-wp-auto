@@ -37,7 +37,7 @@ jobs:
           BODY_IMAGE_COUNT: "3"
           MAX_FIX: "50"
           BACKUP_DIR: "backups"
-          DRY_RUN: "1"
+          DRY_RUN: "0"
         run: |
           python scripts/recover_autopost.py
 
