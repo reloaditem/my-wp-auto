@@ -42,7 +42,7 @@ jobs:
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          DRY_RUN: "1"
+          DRY_RUN: "0"
           MAX_FIX: "50"
           MIN_WORDS: "500"
           AFTER_DATE_KST: "2026-02-12"
