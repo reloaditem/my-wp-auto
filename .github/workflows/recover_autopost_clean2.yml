@@ -39,7 +39,7 @@ jobs:
           BACKUP_DIR: "backups"
           DRY_RUN: "1"
         run: |
-          python scripts/recover_autopost_style_clean2_images_le3_or_short_since_2026-02-12.py
+          python scripts/recover_autopost.py
 
       - name: Upload backups artifact
         if: always()
