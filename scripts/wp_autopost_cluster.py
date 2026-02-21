@@ -54,9 +54,10 @@ def wp_get(path: str, params: Optional[dict] = None) -> dict:
     r.raise_for_status()
     return r.json()
 
-def wp_get_list(path: str, params: Optional[dict] = None) -> List[dict]:
+def wp_get_list(path: str, params: Optional[dict] = None):
     url = f"{WP_BASE}{path}"
-    r = requests.get(url, params=params, auth=auth, timeout=TIMEOUT)
+    headers = {"Accept": "application/json"}  # GET에는 Content-Type 넣지 말 것
+    r = requests.get(url, params=params or {}, headers=headers, auth=auth, timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
