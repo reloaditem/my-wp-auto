@@ -6,30 +6,25 @@ on:
 jobs:
   recover:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-        working-directory: ${{ github.workspace }}
 
     steps:
-      - name: Checkout (force current ref)
+      - name: Checkout main (force)
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 1
 
-      - name: Debug workspace
+      - name: Debug list scripts
         run: |
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
           echo "PWD=$(pwd)"
           echo "REF=$GITHUB_REF"
           echo "SHA=$GITHUB_SHA"
           ls -al
-          ls -al scripts || true
-
-      - name: Assert script exists
-        run: |
-          test -f scripts/recover_regenerate_with_backup_since_2026-02-12.py
-          echo "OK: script exists"
+          ls -al scripts
+          echo "Recover scripts:"
+          ls -al scripts | grep recover || true
+          echo "Find recover files:"
+          find scripts -maxdepth 1 -type f -name "recover*.py" -print
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -52,4 +47,7 @@ jobs:
           MIN_WORDS: "500"
           AFTER_DATE_KST: "2026-02-12"
         run: |
-          python scripts/recover_regenerate_with_backup_since_2026-02-12.py
+          # 파일명이 1글자라도 다르면 터지니까, recover 스크립트를 "자동 선택"해서 실행
+          SCRIPT="$(ls -1 scripts/recover_regenerate_with_backup_since_*.py | head -n 1)"
+          echo "Running: $SCRIPT"
+          python "$SCRIPT"
