@@ -1,120 +1,253 @@
 import os
 import re
-import json
+import io
 import html as html_mod
-import random
-import requests
-from datetime import datetime, timedelta, time as dtime
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple
+
+import requests
 from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
-import io
-
 from openai import OpenAI
 
 # =========================
-# ENV
+# ENV (GitHub Secrets)
 # =========================
 WP_BASE = os.environ.get("WP_BASE", "").rstrip("/")
 WP_USER = os.environ.get("WP_USER", "")
 WP_PASS = os.environ.get("WP_PASS", "")
-
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
 
 THUMB_BG_MEDIA_ID = int(os.environ.get("THUMB_BG_MEDIA_ID", "332"))
-SITE_BRAND = os.environ.get("SITE_BRAND", "ReloadItem")
+SITE_BRAND = os.environ.get("SITE_BRAND", "ReloadItem.com")
+HEADER_TEXT = os.environ.get("HEADER_TEXT", "AI Tools · 2026")
 
-# 발행 시간: KST 오전 10시 고정
-PUBLISH_HOUR_KST = int(os.environ.get("PUBLISH_HOUR_KST", "10"))
-PUBLISH_MIN_KST = int(os.environ.get("PUBLISH_MIN_KST", "0"))
+# 발행: 매일 1개, KST 기준
+KST = timezone(timedelta(hours=9))
+PUBLISH_HOUR = int(os.environ.get("PUBLISH_HOUR_KST", "10"))  # 오전 10시
+SLOTS_AHEAD_DAYS = int(os.environ.get("SLOTS_AHEAD_DAYS", "14"))  # 앞으로 2주치 빈 슬롯 채움
+SKIP_WEEKDAY = os.environ.get("SKIP_WEEKDAY", "6")  # 6=일요일 스킵(원하면 6 지우거나 다른 숫자 0~6)
 
-# 한번 실행 시 몇 개 생성할지
-POSTS_PER_RUN = int(os.environ.get("POSTS_PER_RUN", "3"))
+BODY_IMAGE_COUNT = int(os.environ.get("BODY_IMAGE_COUNT", "3"))
+TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "30"))
 
-# 가격표기 제거
-REMOVE_PRICING = os.environ.get("REMOVE_PRICING", "1") == "1"
+# 타입 반복 규칙: INFO, INFO, VS
+TYPE_PATTERN = ["INFO", "INFO", "VS"]
 
-# 카테고리 랜덤 발행(네가 원한 방식)
-RANDOM_CATEGORY = os.environ.get("RANDOM_CATEGORY", "1") == "1"
+if not (WP_BASE and WP_USER and WP_PASS):
+    raise SystemExit("Missing env: WP_BASE, WP_USER, WP_PASS")
+if not OPENAI_API_KEY:
+    raise SystemExit("Missing env: OPENAI_API_KEY")
 
 auth = HTTPBasicAuth(WP_USER, WP_PASS)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-def must_env():
-    missing = []
-    for k in ["WP_BASE", "WP_USER", "WP_PASS", "OPENAI_API_KEY"]:
-        if not os.environ.get(k):
-            missing.append(k)
-    if missing:
-        raise SystemExit(f"Missing env: {', '.join(missing)}")
+# =========================
+# WP REST helpers
+# =========================
+def wp_get(path: str, params: Optional[dict] = None) -> dict:
+    url = f"{WP_BASE}{path}"
+    r = requests.get(url, params=params, auth=auth, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
 
-def wp_get(path: str, params: dict = None) -> requests.Response:
-    return requests.get(f"{WP_BASE}{path}", params=params, auth=auth, timeout=60)
+def wp_get_list(path: str, params: Optional[dict] = None) -> List[dict]:
+    url = f"{WP_BASE}{path}"
+    r = requests.get(url, params=params, auth=auth, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
 
-def wp_post(path: str, json_body: dict = None, headers=None, data=None) -> requests.Response:
-    return requests.post(f"{WP_BASE}{path}", json=json_body, headers=headers, data=data, auth=auth, timeout=120)
+def wp_post(path: str, payload: dict) -> dict:
+    url = f"{WP_BASE}{path}"
+    r = requests.post(url, json=payload, auth=auth, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
 
-def fetch_media_source_url(media_id: int) -> Optional[str]:
-    r = wp_get(f"/wp-json/wp/v2/media/{media_id}")
-    if r.status_code != 200:
-        return None
-    return r.json().get("source_url")
+def wp_upload_media(file_bytes: bytes, filename: str, mime: str = "image/jpeg") -> int:
+    url = f"{WP_BASE}/wp-json/wp/v2/media"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Type": mime,
+    }
+    r = requests.post(url, headers=headers, data=file_bytes, auth=auth, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()["id"]
 
+def wp_get_media_source_url(media_id: int) -> str:
+    j = wp_get(f"/wp-json/wp/v2/media/{media_id}")
+    return j.get("source_url", "")
+
+def wp_get_categories() -> List[dict]:
+    cats = []
+    page = 1
+    while True:
+        chunk = wp_get_list("/wp-json/wp/v2/categories", params={"per_page": 100, "page": page})
+        if not chunk:
+            break
+        cats.extend(chunk)
+        if len(chunk) < 100:
+            break
+        page += 1
+    # 고정 순서(안 흔들리게): id 기준 정렬
+    cats.sort(key=lambda x: x.get("id", 0))
+    return cats
+
+def wp_get_recent_posts(limit: int = 30) -> List[dict]:
+    # publish + future 섞어서 최근순으로 가져오기(다음 로직 계산용)
+    posts = wp_get_list(
+        "/wp-json/wp/v2/posts",
+        params={"per_page": min(limit, 100), "status": "publish,future", "orderby": "date", "order": "desc"},
+    )
+    return posts
+
+def wp_get_future_posts_in_range(start_iso: str, end_iso: str) -> List[dict]:
+    return wp_get_list(
+        "/wp-json/wp/v2/posts",
+        params={"per_page": 100, "status": "future", "after": start_iso, "before": end_iso, "orderby": "date", "order": "asc"},
+    )
+
+# =========================
+# Content rules
+# =========================
+PRICE_PATTERNS = [
+    r"\$\s?\d[\d,]*(\.\d+)?",
+    r"USD\s?\d[\d,]*(\.\d+)?",
+    r"\b\d[\d,]*(\.\d+)?\s?(USD|달러)\b",
+    r"\b\d[\d,]*(\.\d+)?\s?(원|KRW)\b",
+    r"\bfrom\s+\$\s?\d[\d,]*(\.\d+)?",
+    r"\bstarting\s+at\s+\$\s?\d[\d,]*(\.\d+)?",
+]
+
+def strip_pricing(html: str) -> str:
+    if not html:
+        return html
+    for pat in PRICE_PATTERNS:
+        html = re.sub(pat, "", html, flags=re.IGNORECASE)
+    return html
+
+def fix_tables(html: str) -> str:
+    if not html:
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    changed = False
+    for table in soup.find_all("table"):
+        if table.parent and table.parent.name == "div" and "table-scroll" in (table.parent.get("class") or []):
+            continue
+        wrapper = soup.new_tag("div")
+        wrapper["class"] = ["table-scroll"]
+        table.wrap(wrapper)
+        changed = True
+    if changed:
+        style_id = "ri-table-scroll-style"
+        if not soup.find("style", attrs={"id": style_id}):
+            style = soup.new_tag("style")
+            style["id"] = style_id
+            style.string = """
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:18px 0;border:1px solid rgba(255,255,255,.08);border-radius:12px}
+.table-scroll table{min-width:640px;width:100%;border-collapse:collapse}
+.table-scroll th,.table-scroll td{padding:10px 12px}
+"""
+            soup.insert(0, style)
+    return str(soup)
+
+def unsplash_search(query: str, count: int = 3) -> List[str]:
+    if not UNSPLASH_ACCESS_KEY:
+        return []
+    try:
+        url = "https://api.unsplash.com/search/photos"
+        params = {
+            "query": query,
+            "per_page": min(max(count, 3), 10),
+            "orientation": "landscape",
+            "content_filter": "high",
+        }
+        headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"}
+        r = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        results = data.get("results", [])
+        urls = []
+        for item in results:
+            u = item.get("urls", {}).get("regular")
+            if u:
+                urls.append(u)
+        return urls[:count]
+    except Exception:
+        return []
+
+def ensure_body_images(html: str, topic: str) -> str:
+    if BODY_IMAGE_COUNT <= 0:
+        return html
+    soup = BeautifulSoup(html or "", "html.parser")
+    imgs = soup.find_all("img")
+    if len(imgs) >= BODY_IMAGE_COUNT:
+        return str(soup)
+
+    need = BODY_IMAGE_COUNT - len(imgs)
+    urls = unsplash_search(topic, count=max(need, BODY_IMAGE_COUNT))
+    if not urls:
+        return str(soup)
+
+    h2s = soup.find_all(["h2", "h3"])
+    insert_points = []
+    if h2s:
+        insert_points = [h2s[0]]
+        if len(h2s) >= 2:
+            insert_points.append(h2s[len(h2s)//2])
+        if len(h2s) >= 3:
+            insert_points.append(h2s[-1])
+    else:
+        insert_points = [soup.find() or soup]
+
+    used = 0
+    for i in range(need):
+        u = urls[i % len(urls)]
+        fig = soup.new_tag("figure")
+        fig["class"] = ["wp-block-image", "size-large"]
+        img = soup.new_tag("img")
+        img["src"] = u
+        img["alt"] = f"{topic} illustration"
+        img["loading"] = "lazy"
+        img["style"] = "width:100%;border-radius:14px;margin:26px 0;"
+        fig.append(img)
+        anchor = insert_points[used % len(insert_points)]
+        anchor.insert_before(fig)
+        used += 1
+
+    return str(soup)
+
+# =========================
+# Thumbnail generation
+# =========================
 def download_bytes(url: str) -> Optional[bytes]:
     try:
-        r = requests.get(url, timeout=60)
-        if r.status_code != 200:
-            return None
+        r = requests.get(url, timeout=TIMEOUT)
+        r.raise_for_status()
         return r.content
     except Exception:
         return None
 
-def safe_ascii_category(cat: str) -> str:
-    if not cat:
-        return ""
-    if re.search(r"[^\x00-\x7F]", cat):
-        return ""
-    return cat.strip()
+def load_font(size: int) -> ImageFont.ImageFont:
+    for path in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
 
-def make_featured_image(bg_bytes: bytes, title: str, category: str) -> bytes:
-    img = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
-    img = img.resize((1200, 630))
-
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(overlay)
-
-    panel_margin = 90
-    panel = (panel_margin, 140, 1200 - panel_margin, 630 - 140)
-    d.rounded_rectangle(panel, radius=26, fill=(0, 0, 0, 160), outline=(212, 175, 55, 200), width=3)
-    d.line((panel[0] + 30, panel[1] + 28, panel[2] - 30, panel[1] + 28), fill=(212, 175, 55, 220), width=3)
-    d.line((panel[0] + 30, panel[3] - 28, panel[2] - 30, panel[3] - 28), fill=(212, 175, 55, 220), width=3)
-
-    img = Image.alpha_composite(img, overlay)
-    d = ImageDraw.Draw(img)
-
-    try:
-        font_title = ImageFont.truetype("DejaVuSans.ttf", 54)
-        font_meta = ImageFont.truetype("DejaVuSans.ttf", 26)
-        font_brand = ImageFont.truetype("DejaVuSans.ttf", 28)
-    except Exception:
-        font_title = ImageFont.load_default()
-        font_meta = ImageFont.load_default()
-        font_brand = ImageFont.load_default()
-
-    cat = safe_ascii_category(category)
-    d.text((panel[0] + 40, panel[1] + 45), SITE_BRAND, fill=(255, 255, 255, 235), font=font_brand)
-    if cat:
-        d.text((panel[2] - 40 - d.textlength(cat, font=font_meta), panel[1] + 52), cat, fill=(212, 175, 55, 235), font=font_meta)
-
-    t = title.strip()
-    max_w = panel[2] - panel[0] - 80
-    words = t.split()
+def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
+    words = re.split(r"\s+", text.strip())
     lines = []
     cur = ""
     for w in words:
         test = (cur + " " + w).strip()
-        if d.textlength(test, font=font_title) <= max_w:
+        width = draw.textbbox((0, 0), test, font=font)[2]
+        if width <= max_width:
             cur = test
         else:
             if cur:
@@ -122,254 +255,274 @@ def make_featured_image(bg_bytes: bytes, title: str, category: str) -> bytes:
             cur = w
     if cur:
         lines.append(cur)
-    lines = lines[:3]
+    return lines
 
-    y = panel[1] + 125
-    for line in lines:
-        d.text((panel[0] + 40, y), line, fill=(255, 255, 255, 245), font=font_title)
-        y += 68
+def make_featured_image(bg_bytes: bytes, title: str, category: str) -> bytes:
+    base = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
+    base = base.resize((1200, 675))
 
-    domain = re.sub(r"^https?://", "", WP_BASE).split("/")[0]
-    d.text((panel[0] + 40, panel[3] - 80), domain, fill=(255, 255, 255, 200), font=font_meta)
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
 
-    out = io.BytesIO()
-    img.convert("RGB").save(out, format="JPEG", quality=92, optimize=True)
-    return out.getvalue()
+    gold = (212, 175, 55, 220)
+    draw.line([(120, 90), (1080, 90)], fill=gold, width=3)
+    draw.line([(120, 585), (1080, 585)], fill=gold, width=3)
 
-def upload_media(image_bytes: bytes, filename: str) -> int:
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
-        "Content-Type": "image/jpeg",
-    }
-    r = requests.post(f"{WP_BASE}/wp-json/wp/v2/media", data=image_bytes, headers=headers, auth=auth, timeout=120)
-    if r.status_code not in (200, 201):
-        raise RuntimeError(f"Media upload failed: {r.status_code} {r.text[:300]}")
-    return r.json()["id"]
+    panel = (90, 140, 1110, 535)
+    draw.rounded_rectangle(panel, radius=28, fill=(0, 0, 0, 140), outline=(212, 175, 55, 140), width=2)
 
-def get_categories() -> List[dict]:
-    cats = []
-    page = 1
-    while True:
-        r = wp_get("/wp-json/wp/v2/categories", params={"per_page": 100, "page": page})
-        if r.status_code != 200:
-            break
-        batch = r.json()
-        if not batch:
-            break
-        cats.extend(batch)
-        if len(batch) < 100:
-            break
-        page += 1
-    # uncategorized 제거(원하면)
-    cats = [c for c in cats if c.get("slug") != "uncategorized"]
-    return cats
+    font_header = load_font(28)
+    font_title = load_font(56)
+    font_footer = load_font(24)
 
-def unsplash_search(query: str) -> Optional[str]:
-    if not UNSPLASH_ACCESS_KEY:
-        return None
-    try:
-        r = requests.get(
-            "https://api.unsplash.com/search/photos",
-            params={"query": query, "per_page": 10, "orientation": "landscape"},
-            headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
-            timeout=60,
-        )
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        results = data.get("results") or []
-        if not results:
-            return None
-        pick = random.choice(results[:8])
-        return pick["urls"]["regular"]
-    except Exception:
-        return None
+    header = HEADER_TEXT
+    footer_left = SITE_BRAND
+    footer_right = (category or "").upper()
 
-def strip_pricing(html_text: str) -> str:
-    if not REMOVE_PRICING:
-        return html_text
+    w = draw.textbbox((0, 0), header, font=font_header)[2]
+    draw.text(((1200 - w) / 2, 170), header, font=font_header, fill=gold)
 
-    soup = BeautifulSoup(html_text, "html.parser")
+    lines = wrap_text(draw, title, font_title, 920)
+    y = 250
+    for line in lines[:3]:
+        w = draw.textbbox((0, 0), line, font=font_title)[2]
+        draw.text(((1200 - w) / 2, y), line, font=font_title, fill=(255, 255, 255, 235))
+        y += 70
 
-    # 1) 가격 문자열 자체는 치환(삭제) — 본문은 유지
-    #    (PartnerStack 민감 요소 제거 목적)
-    for node in soup.find_all(string=True):
-        s = str(node)
-        s2 = re.sub(r"\$\s?\d+(\.\d+)?", "", s)                 # $99, $99.9 제거
-        s2 = re.sub(r"\b\d+\s*/\s*mo\b", "", s2, flags=re.I)    # 19/mo 제거
-        s2 = re.sub(r"\bper\s+month\b", "", s2, flags=re.I)     # per month 제거
-        s2 = re.sub(r"\bmonthly\b", "", s2, flags=re.I)         # monthly 제거
-        if s2 != s:
-            node.replace_with(s2)
+    draw.text((170, 500), footer_left, font=font_footer, fill=(255, 255, 255, 210))
+    if footer_right:
+        w = draw.textbbox((0, 0), footer_right, font=font_footer)[2]
+        draw.text((1200 - 170 - w, 500), footer_right, font=font_footer, fill=gold)
 
-    # 2) “Pricing:” 같은 가격 섹션 문단만 제거(전체 삭제 X)
-    #    너무 공격적으로 지우면 본문 망가져서, '가격 섹션'으로 보이는 것만 제거
-    pricing_pat = re.compile(r"\b(pricing\s*:|price\s*:|billing\s*:)\b", re.I)
+    out = Image.alpha_composite(base, overlay).convert("RGB")
+    buf = io.BytesIO()
+    out.save(buf, format="JPEG", quality=92, optimize=True)
+    return buf.getvalue()
 
-    # p/li/figcaption 등 텍스트 블록에서 pricing_pat 잡히면 그 블록만 제거
-    for tag in soup.find_all(["p", "li", "figcaption", "blockquote"]):
-        txt = tag.get_text(" ", strip=True)
-        if pricing_pat.search(txt):
-            tag.decompose()
+# =========================
+# Type + Category rotation logic
+# =========================
+def is_vs_post(title: str) -> bool:
+    t = (title or "").lower()
+    return " vs " in t or " vs:" in t or t.startswith("vs ") or " versus " in t
 
-    # 3) 표(table)에서 가격 패턴이 강하게 보이는 row만 제거
-    row_pat = re.compile(r"(\$\s?\d+|\bper\s+month\b|\bmonthly\b|\b\/\s*mo\b)", re.I)
-    for tr in soup.find_all("tr"):
-        txt = tr.get_text(" ", strip=True)
-        if row_pat.search(txt):
-            tr.decompose()
+def classify_type_from_post(post: dict) -> str:
+    title_html = (post.get("title") or {}).get("rendered", "")
+    title = BeautifulSoup(title_html, "html.parser").get_text(" ", strip=True)
+    return "VS" if is_vs_post(title) else "INFO"
 
-    return str(soup)
+def next_type_from_recent(recent_posts: List[dict]) -> str:
+    """
+    최근 글들을 보고 TYPE_PATTERN(INFO,INFO,VS)의 다음을 계산
+    - 최근 글이 패턴 어디까지 왔는지 매칭해서 다음 타입 결정
+    """
+    seq = []
+    for p in recent_posts[:20]:
+        seq.append(classify_type_from_post(p))
 
-def add_table_wrappers(html_text: str) -> str:
-    soup = BeautifulSoup(html_text, "html.parser")
-    for table in soup.find_all("table"):
-        parent = table.parent
-        if parent and parent.name == "div" and "ri-table" in (parent.get("class") or []):
-            continue
-        wrapper = soup.new_tag("div")
-        wrapper["class"] = ["ri-table"]
-        table.wrap(wrapper)
-        table["class"] = list(set((table.get("class") or []) + ["ri-table__table"]))
-    return str(soup)
+    # seq[0]이 가장 최신. 최근 흐름의 끝을 찾기 위해 역순으로 패턴을 맞춤
+    seq_rev = list(reversed(seq))  # 오래된 -> 최신
+    best_idx = None
+    best_len = -1
 
-def insert_images(html_text: str, topic: str, title: str) -> str:
-    # 3개: intro / mid / end
-    # 실패하면 그냥 스킵
-    urls = []
-    for q in [topic, f"{topic} software", f"{topic} workflow"]:
-        u = unsplash_search(q)
-        if u:
-            urls.append(u)
-        if len(urls) >= 3:
+    # 패턴이 무한 반복이라고 보고, seq_rev 끝부분과 가장 잘 맞는 길이를 찾는다
+    for start in range(len(TYPE_PATTERN)):
+        pat = []
+        for i in range(len(seq_rev)):
+            pat.append(TYPE_PATTERN[(start + i) % len(TYPE_PATTERN)])
+        # 끝에서부터 최대 일치 길이
+        k = 0
+        for i in range(1, len(seq_rev) + 1):
+            if seq_rev[-i] == pat[-i]:
+                k += 1
+            else:
+                break
+        if k > best_len:
+            best_len = k
+            best_idx = (start + len(seq_rev)) % len(TYPE_PATTERN)
+
+    # best_idx는 "다음 위치"
+    return TYPE_PATTERN[best_idx] if best_idx is not None else TYPE_PATTERN[0]
+
+def next_category_id(cats: List[dict], recent_posts: List[dict]) -> int:
+    """
+    최근 글(예약 포함)의 카테고리 기반으로 다음 카테고리를 순차 회전
+    """
+    if not cats:
+        raise SystemExit("No categories in WP.")
+    cat_ids = [c["id"] for c in cats]
+
+    # 최근 글에서 첫 번째 카테고리 id를 찾는다
+    last_cat_id = None
+    for p in recent_posts[:30]:
+        cids = p.get("categories") or []
+        if cids:
+            last_cat_id = cids[0]
             break
 
-    if len(urls) < 1:
-        return html_text
+    if last_cat_id in cat_ids:
+        idx = cat_ids.index(last_cat_id)
+        return cat_ids[(idx + 1) % len(cat_ids)]
+    return cat_ids[0]
 
-    soup = BeautifulSoup(html_text, "html.parser")
-    paras = soup.find_all(["p", "h2", "h3"])
-    if not paras:
-        return html_text
+def cat_name_from_id(cats: List[dict], cid: int) -> str:
+    for c in cats:
+        if c.get("id") == cid:
+            return c.get("name", "")
+    return ""
 
-    def fig(url: str, idx: int):
-        f = soup.new_tag("figure")
-        f["class"] = ["wp-block-image"]
-        img = soup.new_tag("img")
-        img["src"] = url
-        img["alt"] = f"{html_mod.escape(title)} image {idx}"
-        img["loading"] = "lazy"
-        img["style"] = "width:100%;border-radius:14px;margin:22px 0;"
-        f.append(img)
-        return f
+# =========================
+# AI: generate post
+# =========================
+def ai_generate_article(title: str, category: str, post_type: str) -> str:
+    sys = (
+        "You are writing for a SaaS/AI tools blog. "
+        "Do NOT mention any prices, dollar amounts, plan fees, or currency. "
+        "Avoid pricing tables or pricing columns. "
+        "Write in natural English. Use clear headings (H2/H3), bullets, and practical steps. "
+        "Return HTML only."
+    )
 
-    # 위치 선정
-    a = max(1, min(3, len(paras)-1))
-    b = max(a+2, len(paras)//2)
-    c = max(b+2, len(paras)-2)
+    if post_type == "VS":
+        user = f"""
+Write a comparison blog post.
 
-    inserts = [(a, 0), (b, 1), (c, 2)]
-    for pos, idx in reversed(inserts):
-        if idx < len(urls):
-            paras[pos].insert_after(fig(urls[idx], idx+1))
-    return str(soup)
+Title: {title}
+Category: {category}
 
-def next_kst_10_slots(n: int) -> List[datetime]:
-    # “월화수 / 목금토” 느낌으로: 일요일 제외하고 다음 10시 슬롯 n개 생성
-    # KST 기준 -> UTC 변환은 WP가 사이트 타임존 따라가므로 여기서는 ISO로 "현지 시간" 넣어도 됨(WP 설정이 KST이면 OK)
-    now = datetime.now()
+Requirements:
+- 1300~1900 words.
+- Explain what each tool is, who it fits, and decision criteria.
+- Include a comparison table with only: "Best for", "Strengths", "Weaknesses", "Integrations", "Learning curve" (NO pricing).
+- Add a section near the top titled "Save or Print Checklist" with a short note:
+  "Use the print window to save as PDF or print a copy."
+- End with a checklist (bulleted with [ ] items).
+- No prices, no currency, no $/mo, no plan fees.
+Return HTML only.
+"""
+    else:
+        user = f"""
+Write a practical guide blog post.
+
+Title: {title}
+Category: {category}
+
+Requirements:
+- 1200~1800 words.
+- Include: intro paragraph, 6~9 sections, conclusion.
+- Add a section near the top titled "Save or Print Checklist" with a short note:
+  "Use the print window to save as PDF or print a copy."
+- End with a checklist (bulleted with [ ] items).
+- No prices, no currency, no $/mo, no plan fees.
+Return HTML only.
+"""
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+        temperature=0.6,
+    )
+    return resp.choices[0].message.content
+
+# =========================
+# Scheduling slots: daily 1
+# =========================
+def upcoming_slots(now_kst: datetime) -> List[datetime]:
     slots = []
-    d = now.date()
-    while len(slots) < n:
-        d += timedelta(days=1)
-        # Sunday skip
-        if d.weekday() == 6:
+    skip = int(SKIP_WEEKDAY)
+    for d in range(SLOTS_AHEAD_DAYS + 1):
+        dt = datetime.combine(now_kst.date() + timedelta(days=d), datetime.min.time(), tzinfo=KST).replace(hour=PUBLISH_HOUR)
+        if dt < now_kst:
             continue
-        slots.append(datetime.combine(d, dtime(PUBLISH_HOUR_KST, PUBLISH_MIN_KST, 0)))
+        if dt.weekday() == skip:
+            continue
+        slots.append(dt)  # 매일 1개
     return slots
 
-def generate_article(client: OpenAI, category_name: str) -> Tuple[str, str, str]:
-    # 제목/주제/본문 생성
-    prompt = f"""
-You write for a practical AI tools & software review blog.
-Category: {category_name}
-
-Rules:
-- No exact dollar amounts, no per-month pricing numbers, no $ symbols.
-- Clear sections: Introduction, Top Tools (5-8 tools), Comparison Table, Practical Setup Tips, FAQs, Conclusion.
-- Add a short note near the top: "A save/print-friendly checklist is included at the end. Use the print window to save as a PDF or print."
-- Include a checklist section at the end (bullets with [ ]), and tell readers to use print window to save/print.
-- Keep it helpful for small businesses.
-- Write in English.
-
-Return JSON with keys: title, topic, html
-"""
-    resp = client.responses.create(
-        model="gpt-5-mini",
-        input=prompt,
-    )
-    txt = resp.output_text
-    # JSON 파싱
-    m = re.search(r"\{.*\}", txt, re.S)
-    if not m:
-        raise RuntimeError("Model did not return JSON")
-    data = json.loads(m.group(0))
-    title = data["title"].strip()
-    topic = data["topic"].strip()
-    html_body = data["html"].strip()
-    return title, topic, html_body
-
-def create_post(title: str, content_html: str, category_id: int, featured_media_id: int, date_local: datetime):
-    payload = {
-        "title": title,
-        "content": content_html,
-        "status": "future",
-        "categories": [category_id],
-        "featured_media": featured_media_id,
-        "date": date_local.strftime("%Y-%m-%dT%H:%M:%S"),
-    }
-    r = wp_post("/wp-json/wp/v2/posts", json_body=payload)
-    if r.status_code not in (200, 201):
-        raise RuntimeError(f"Post create failed: {r.status_code} {r.text[:300]}")
-    return r.json()["id"]
+def iso(dt: datetime) -> str:
+    return dt.isoformat()
 
 def main():
-    must_env()
-
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    # background bytes
-    bg_url = fetch_media_source_url(THUMB_BG_MEDIA_ID)
-    if not bg_url:
-        raise SystemExit(f"Cannot fetch background media source_url for id={THUMB_BG_MEDIA_ID}")
-    bg_bytes = download_bytes(bg_url)
-    if not bg_bytes:
-        raise SystemExit("Cannot download background image bytes")
-
-    cats = get_categories()
+    cats = wp_get_categories()
     if not cats:
-        raise SystemExit("No categories found")
+        raise SystemExit("No categories found in WP.")
 
-    slots = next_kst_10_slots(POSTS_PER_RUN)
+    recent = wp_get_recent_posts(limit=40)
 
-    for i in range(POSTS_PER_RUN):
-        cat = random.choice(cats) if RANDOM_CATEGORY else cats[0]
-        cat_id = cat["id"]
-        cat_name = cat.get("name", "")
+    # 썸네일 배경 다운로드
+    bg_url = wp_get_media_source_url(THUMB_BG_MEDIA_ID)
+    bg_bytes = download_bytes(bg_url) if bg_url else None
+    if not bg_bytes:
+        raise SystemExit("Could not download thumbnail background. Check THUMB_BG_MEDIA_ID")
 
-        title, topic, body = generate_article(client, cat_name)
+    now_kst = datetime.now(tz=KST)
+    slots = upcoming_slots(now_kst)
+    if not slots:
+        print("No slots generated. Exiting.")
+        return
 
-        # 정리
-        body = strip_pricing(body)
-        body = add_table_wrappers(body)
-        body = insert_images(body, topic=topic, title=title)
+    # 이미 예약된 글 시간 범위 체크
+    start = iso(slots[0] - timedelta(hours=1))
+    end = iso(slots[-1] + timedelta(hours=1))
+    existing_future = wp_get_future_posts_in_range(start, end)
+    existing_keys = set()
+    for p in existing_future:
+        date_local = p.get("date")
+        if date_local:
+            existing_keys.add(date_local[:16])
 
-        # featured 생성/업로드
-        thumb_bytes = make_featured_image(bg_bytes, title, cat_name)
-        thumb_id = upload_media(thumb_bytes, f"thumb_new_{int(datetime.now().timestamp())}_{i}.jpg")
+    targets = [s for s in slots if s.isoformat()[:16] not in existing_keys]
+    if not targets:
+        print("No empty slots to fill. Exiting.")
+        return
 
-        post_id = create_post(title, body, cat_id, thumb_id, slots[i])
-        print(f"Created future post id={post_id} at {slots[i]} KST | cat={cat_name} | featured={thumb_id}")
+    print(f"Now(KST)={now_kst.isoformat()} | targets={len(targets)}")
+
+    # 현재 패턴/카테고리 시작점 계산
+    cur_type = next_type_from_recent(recent)
+    cur_cat_id = next_category_id(cats, recent)
+
+    for dt in targets:
+        cat_name = cat_name_from_id(cats, cur_cat_id) or "AI Tools"
+
+        # 타입별 제목 템플릿
+        if cur_type == "VS":
+            title = f"{cat_name}: Tool A vs Tool B vs Tool C — What to Choose in 2026"
+        else:
+            title = f"Best {cat_name} Tools (2026): A Practical Guide for Small Teams"
+
+        # 본문 생성/정리
+        html = ai_generate_article(title, cat_name, cur_type)
+        html = strip_pricing(html)
+        html = fix_tables(html)
+        html = ensure_body_images(html, f"{cat_name} {cur_type}")
+
+        # 썸네일 생성 업로드
+        safe_title = html_mod.unescape(BeautifulSoup(title, "html.parser").get_text(" ", strip=True))
+        thumb_bytes = make_featured_image(bg_bytes, safe_title, cat_name)
+        media_id = wp_upload_media(thumb_bytes, f"thumb_auto_{dt.strftime('%Y%m%d_%H%M')}.jpg", mime="image/jpeg")
+
+        payload = {
+            "title": title,
+            "status": "future",
+            "date": dt.isoformat(),
+            "content": html,
+            "categories": [cur_cat_id],
+            "featured_media": media_id,
+        }
+
+        created = wp_post("/wp-json/wp/v2/posts", payload)
+        print(f"Created future post id={created['id']} date={created.get('date')} type={cur_type} cat={cat_name}")
+
+        # 다음 글 준비: 타입 패턴 진행 + 카테고리 회전
+        # 타입: INFO,INFO,VS 반복
+        idx = TYPE_PATTERN.index(cur_type)
+        cur_type = TYPE_PATTERN[(idx + 1) % len(TYPE_PATTERN)]
+
+        # 카테고리: 매번 다음 카테고리로 회전
+        cat_ids = [c["id"] for c in cats]
+        cur_idx = cat_ids.index(cur_cat_id) if cur_cat_id in cat_ids else -1
+        cur_cat_id = cat_ids[(cur_idx + 1) % len(cat_ids)]
 
 if __name__ == "__main__":
     main()
