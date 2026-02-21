@@ -1,0 +1,50 @@
+name: Recover (Autopost-Style, Clean2)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 openai
+
+      - name: Run recovery (DRY RUN)
+        env:
+          WP_BASE: ${{ secrets.WP_BASE }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASS: ${{ secrets.WP_PASS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          AFTER_DATE_KST: "2026-02-12"
+          MIN_WORDS: "700"
+          INTERNAL_LINKS: "3"
+          BODY_IMAGE_COUNT: "3"
+          MAX_FIX: "50"
+          BACKUP_DIR: "backups"
+          DRY_RUN: "1"
+        run: |
+          python scripts/recover_autopost_style_clean2_images_le3_or_short_since_2026-02-12.py
+
+      - name: Upload backups artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wp-backups
+          path: backups/
+          if-no-files-found: ignore
