@@ -1,24 +1,14 @@
-name: wp_maintain_all
+name: maintain
 
 on:
   workflow_dispatch:
-    inputs:
-      per_status_limit:
-        description: "How many posts per status"
-        required: true
-        default: "50"
-      dry_run:
-        description: "1 = no update, just run"
-        required: true
-        default: "0"
   schedule:
-    - cron: "20 3 * * *" # KST 12:20 (UTC+0 기준). 원하면 바꿔.
+    # KST 14:00 = UTC 05:00 (원하면 바꿔)
+    - cron: "0 5 * * *"
 
 jobs:
-  run:
+  maintain:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
     steps:
       - uses: actions/checkout@v4
 
@@ -29,24 +19,18 @@ jobs:
 
       - name: Install deps
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run maintain (publish + future)
+      - name: Run maintenance (publish + future)
         env:
           WP_BASE: ${{ secrets.WP_BASE }}
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
-
-          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-
-          TARGET_STATUSES: "publish,future"
-          PER_STATUS_LIMIT: ${{ github.event.inputs.per_status_limit }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
-
-          BRAND_TEXT: "RELOADITEM"
-          FOOTER_TEXT: "AI TOOLS"
-
-          ADD_BODY_IMAGES: "1"
-          UPLOAD_BODY_IMAGES_TO_WP: "1"
+          THUMB_BG_MEDIA_ID: "332"
+          SITE_BRAND: "ReloadItem"
+          POST_LIMIT: "50"
+          INCLUDE_FUTURE: "1"
+          REMOVE_PRICING: "1"
         run: |
           python scripts/wp_maintain_all.py
