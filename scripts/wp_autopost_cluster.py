@@ -48,9 +48,10 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # =========================
 # WP REST helpers
 # =========================
-def wp_get(path: str, params: Optional[dict] = None) -> dict:
+def wp_get(path: str, params: Optional[dict] = None):
     url = f"{WP_BASE}{path}"
-    r = requests.get(url, params=params, auth=auth, timeout=TIMEOUT)
+    headers = {"Accept": "application/json"}
+    r = requests.get(url, params=params or {}, headers=headers, auth=auth, timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
