@@ -3,7 +3,7 @@ import re
 import io
 import html as html_mod
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -46,44 +46,95 @@ auth = HTTPBasicAuth(WP_USER, WP_PASS)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
-# WP REST helpers
+# WP REST helpers (robust)
 # =========================
-def wp_get(path: str, params: Optional[dict] = None):
-    url = f"{WP_BASE}{path}"
-    headers = {"Accept": "application/json"}
-    r = requests.get(url, params=params or {}, headers=headers, auth=auth, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+def _ensure_json_response(r: requests.Response, context: str) -> None:
+    """
+    GitHub Actions + WAF/보안플러그인 환경에서 HTML/텍스트가 오는 경우가 잦아서
+    content-type 확인 후 JSON이 아니면 바로 원인 출력하고 종료한다.
+    """
+    ct = (r.headers.get("content-type") or "").lower()
+    if "application/json" not in ct:
+        print(f"[{context}] NON-JSON response")
+        print("  status:", r.status_code)
+        print("  content-type:", ct)
+        body = (r.text or "")
+        print("  body(head):", body[:400])
+        # HTTP 에러면 raise
+        try:
+            r.raise_for_status()
+        except Exception:
+            raise
+        # 200인데 HTML이면 대부분 리다이렉트/차단 페이지
+        raise SystemExit(f"{context}: WP did not return JSON (blocked/redirected/WAF).")
 
-def wp_get_list(path: str, params: Optional[dict] = None):
+def wp_get(path: str, params: Optional[dict] = None):
     url = f"{WP_BASE}{path}"
     headers = {"Accept": "application/json"}  # GET에는 Content-Type 넣지 말 것
     r = requests.get(url, params=params or {}, headers=headers, auth=auth, timeout=TIMEOUT)
+    _ensure_json_response(r, f"GET {path}")
     r.raise_for_status()
     return r.json()
 
+def wp_get_list(path: str, params: Optional[dict] = None) -> List[dict]:
+    """
+    list endpoint는 반드시 list[dict]여야 한다.
+    - dict가 오면 WP REST error일 가능성이 크므로 메시지 출력 후 종료
+    - list라도 요소가 str 등으로 섞이면 종료(원인 숨기지 않음)
+    """
+    data = wp_get(path, params)
+    if isinstance(data, dict):
+        code = data.get("code")
+        msg = data.get("message")
+        print(f"[GET {path}] WP API ERROR:", code, "|", msg)
+        raise SystemExit(f"WP API returned error dict: {code}")
+
+    if not isinstance(data, list):
+        print(f"[GET {path}] Unexpected JSON type:", type(data))
+        print("  body(head):", str(data)[:400])
+        raise SystemExit("Unexpected WP API response type (not list).")
+
+    if any(not isinstance(x, dict) for x in data):
+        bad = [x for x in data if not isinstance(x, dict)]
+        print(f"[GET {path}] Non-dict items found in list. sample:", bad[:3])
+        raise SystemExit("WP list response contains non-dict items (strings).")
+
+    return data
+
 def wp_post(path: str, payload: dict) -> dict:
     url = f"{WP_BASE}{path}"
-    r = requests.post(url, json=payload, auth=auth, timeout=TIMEOUT)
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    r = requests.post(url, json=payload, headers=headers, auth=auth, timeout=TIMEOUT)
+    _ensure_json_response(r, f"POST {path}")
     r.raise_for_status()
     return r.json()
 
 def wp_upload_media(file_bytes: bytes, filename: str, mime: str = "image/jpeg") -> int:
     url = f"{WP_BASE}/wp-json/wp/v2/media"
     headers = {
+        "Accept": "application/json",
         "Content-Disposition": f'attachment; filename="{filename}"',
         "Content-Type": mime,
     }
     r = requests.post(url, headers=headers, data=file_bytes, auth=auth, timeout=TIMEOUT)
+    _ensure_json_response(r, "UPLOAD media")
     r.raise_for_status()
-    return r.json()["id"]
+    j = r.json()
+    mid = j.get("id")
+    if not isinstance(mid, int):
+        print("UPLOAD response(head):", str(j)[:400])
+        raise SystemExit("Media upload did not return numeric id.")
+    return mid
 
 def wp_get_media_source_url(media_id: int) -> str:
     j = wp_get(f"/wp-json/wp/v2/media/{media_id}")
     return j.get("source_url", "")
 
 def wp_get_categories() -> List[dict]:
-    cats = []
+    cats: List[dict] = []
     page = 1
     while True:
         chunk = wp_get_list("/wp-json/wp/v2/categories", params={"per_page": 100, "page": page})
@@ -93,22 +144,46 @@ def wp_get_categories() -> List[dict]:
         if len(chunk) < 100:
             break
         page += 1
-    # 고정 순서(안 흔들리게): id 기준 정렬
+
+    # 안전장치: dict만 유지
+    cats = [c for c in cats if isinstance(c, dict)]
     cats.sort(key=lambda x: x.get("id", 0))
     return cats
 
 def wp_get_recent_posts(limit: int = 30) -> List[dict]:
-    # publish + future 섞어서 최근순으로 가져오기(다음 로직 계산용)
-    posts = wp_get_list(
+    """
+    WP REST에서 status 파라미터가 환경에 따라 콤마 리스트를 거부하는 경우가 있어
+    publish/future를 각각 가져와서 합친다.
+    """
+    per_page = min(limit, 100)
+    pub = wp_get_list(
         "/wp-json/wp/v2/posts",
-        params={"per_page": min(limit, 100), "status": "publish,future", "orderby": "date", "order": "desc"},
+        params={"per_page": per_page, "status": "publish", "orderby": "date", "order": "desc"},
     )
-    return posts
+    fut = wp_get_list(
+        "/wp-json/wp/v2/posts",
+        params={"per_page": per_page, "status": "future", "orderby": "date", "order": "desc"},
+    )
+    posts = (pub or []) + (fut or [])
+
+    def _date_key(p: dict):
+        # WP는 date_gmt / date 를 제공. date 우선
+        return p.get("date") or p.get("date_gmt") or ""
+
+    posts.sort(key=_date_key, reverse=True)
+    return posts[:limit]
 
 def wp_get_future_posts_in_range(start_iso: str, end_iso: str) -> List[dict]:
     return wp_get_list(
         "/wp-json/wp/v2/posts",
-        params={"per_page": 100, "status": "future", "after": start_iso, "before": end_iso, "orderby": "date", "order": "asc"},
+        params={
+            "per_page": 100,
+            "status": "future",
+            "after": start_iso,
+            "before": end_iso,
+            "orderby": "date",
+            "order": "asc",
+        },
     )
 
 # =========================
@@ -171,7 +246,7 @@ def unsplash_search(query: str, count: int = 3) -> List[str]:
         r.raise_for_status()
         data = r.json()
         results = data.get("results", [])
-        urls = []
+        urls: List[str] = []
         for item in results:
             u = item.get("urls", {}).get("regular")
             if u:
@@ -194,7 +269,6 @@ def ensure_body_images(html: str, topic: str) -> str:
         return str(soup)
 
     h2s = soup.find_all(["h2", "h3"])
-    insert_points = []
     if h2s:
         insert_points = [h2s[0]]
         if len(h2s) >= 2:
@@ -244,8 +318,8 @@ def load_font(size: int) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
-    words = re.split(r"\s+", text.strip())
-    lines = []
+    words = re.split(r"\s+", (text or "").strip())
+    lines: List[str] = []
     cur = ""
     for w in words:
         test = (cur + " " + w).strip()
@@ -319,21 +393,20 @@ def next_type_from_recent(recent_posts: List[dict]) -> str:
     최근 글들을 보고 TYPE_PATTERN(INFO,INFO,VS)의 다음을 계산
     - 최근 글이 패턴 어디까지 왔는지 매칭해서 다음 타입 결정
     """
-    seq = []
-    for p in recent_posts[:20]:
-        seq.append(classify_type_from_post(p))
+    seq: List[str] = []
+    for p in (recent_posts or [])[:20]:
+        if isinstance(p, dict):
+            seq.append(classify_type_from_post(p))
 
-    # seq[0]이 가장 최신. 최근 흐름의 끝을 찾기 위해 역순으로 패턴을 맞춤
+    if not seq:
+        return TYPE_PATTERN[0]
+
     seq_rev = list(reversed(seq))  # 오래된 -> 최신
-    best_idx = None
+    best_idx = 0
     best_len = -1
 
-    # 패턴이 무한 반복이라고 보고, seq_rev 끝부분과 가장 잘 맞는 길이를 찾는다
     for start in range(len(TYPE_PATTERN)):
-        pat = []
-        for i in range(len(seq_rev)):
-            pat.append(TYPE_PATTERN[(start + i) % len(TYPE_PATTERN)])
-        # 끝에서부터 최대 일치 길이
+        pat = [TYPE_PATTERN[(start + i) % len(TYPE_PATTERN)] for i in range(len(seq_rev))]
         k = 0
         for i in range(1, len(seq_rev) + 1):
             if seq_rev[-i] == pat[-i]:
@@ -344,20 +417,19 @@ def next_type_from_recent(recent_posts: List[dict]) -> str:
             best_len = k
             best_idx = (start + len(seq_rev)) % len(TYPE_PATTERN)
 
-    # best_idx는 "다음 위치"
-    return TYPE_PATTERN[best_idx] if best_idx is not None else TYPE_PATTERN[0]
+    return TYPE_PATTERN[best_idx]
 
 def next_category_id(cats: List[dict], recent_posts: List[dict]) -> int:
-    """
-    최근 글(예약 포함)의 카테고리 기반으로 다음 카테고리를 순차 회전
-    """
     if not cats:
         raise SystemExit("No categories in WP.")
-    cat_ids = [c["id"] for c in cats]
+    cat_ids = [c["id"] for c in cats if isinstance(c, dict) and isinstance(c.get("id"), int)]
+    if not cat_ids:
+        raise SystemExit("Categories missing numeric ids.")
 
-    # 최근 글에서 첫 번째 카테고리 id를 찾는다
     last_cat_id = None
-    for p in recent_posts[:30]:
+    for p in (recent_posts or [])[:30]:
+        if not isinstance(p, dict):
+            continue
         cids = p.get("categories") or []
         if cids:
             last_cat_id = cids[0]
@@ -431,15 +503,19 @@ Return HTML only.
 # Scheduling slots: daily 1
 # =========================
 def upcoming_slots(now_kst: datetime) -> List[datetime]:
-    slots = []
+    slots: List[datetime] = []
     skip = int(SKIP_WEEKDAY)
     for d in range(SLOTS_AHEAD_DAYS + 1):
-        dt = datetime.combine(now_kst.date() + timedelta(days=d), datetime.min.time(), tzinfo=KST).replace(hour=PUBLISH_HOUR)
+        dt = datetime.combine(
+            now_kst.date() + timedelta(days=d),
+            datetime.min.time(),
+            tzinfo=KST
+        ).replace(hour=PUBLISH_HOUR)
         if dt < now_kst:
             continue
         if dt.weekday() == skip:
             continue
-        slots.append(dt)  # 매일 1개
+        slots.append(dt)
     return slots
 
 def iso(dt: datetime) -> str:
@@ -452,11 +528,11 @@ def main():
 
     recent = wp_get_recent_posts(limit=40)
 
-    # 썸네일 배경 다운로드
-    bg_url = wp_get_media_source_url(THUMBNAIL_BASE_MEDIAID)
+    # 썸네일 배경 다운로드 (FIX: 변수명 오타 THUMBNAIL_BASE_MEDIAID -> THUMBNAIL_BASE_MEDIA_ID)
+    bg_url = wp_get_media_source_url(THUMBNAIL_BASE_MEDIA_ID)
     bg_bytes = download_bytes(bg_url) if bg_url else None
     if not bg_bytes:
-        raise SystemExit("Could not download thumbnail background. Check THUMBNAIL_BASE_MEDIAID")
+        raise SystemExit("Could not download thumbnail background. Check THUMBNAIL_BASE_MEDIA_ID")
 
     now_kst = datetime.now(tz=KST)
     slots = upcoming_slots(now_kst)
@@ -468,8 +544,12 @@ def main():
     start = iso(slots[0] - timedelta(hours=1))
     end = iso(slots[-1] + timedelta(hours=1))
     existing_future = wp_get_future_posts_in_range(start, end)
+
+    # WordPress는 date가 로컬(사이트 설정) 기준 문자열로 오므로, 분단위 키로 비교
     existing_keys = set()
     for p in existing_future:
+        if not isinstance(p, dict):
+            continue
         date_local = p.get("date")
         if date_local:
             existing_keys.add(date_local[:16])
@@ -485,12 +565,15 @@ def main():
     cur_type = next_type_from_recent(recent)
     cur_cat_id = next_category_id(cats, recent)
 
+    cat_ids_all = [c["id"] for c in cats if isinstance(c, dict) and isinstance(c.get("id"), int)]
+
     for dt in targets:
         cat_name = cat_name_from_id(cats, cur_cat_id) or "AI Tools"
 
         # 타입별 제목 템플릿
         if cur_type == "VS":
-            title = f"{cat_name}: Tool A vs Tool B vs Tool C — What to Choose in 2026"
+            # placeholder 대신 카테고리 기반으로 "A/B/C"를 조금 더 자연스럽게
+            title = f"{cat_name}: Top Tools Compared — What to Choose in 2026"
         else:
             title = f"Best {cat_name} Tools (2026): A Practical Guide for Small Teams"
 
@@ -515,17 +598,20 @@ def main():
         }
 
         created = wp_post("/wp-json/wp/v2/posts", payload)
-        print(f"Created future post id={created['id']} date={created.get('date')} type={cur_type} cat={cat_name}")
+        print(
+            f"Created future post id={created.get('id')} "
+            f"date={created.get('date')} type={cur_type} cat={cat_name}"
+        )
 
         # 다음 글 준비: 타입 패턴 진행 + 카테고리 회전
-        # 타입: INFO,INFO,VS 반복
-        idx = TYPE_PATTERN.index(cur_type)
+        idx = TYPE_PATTERN.index(cur_type) if cur_type in TYPE_PATTERN else 0
         cur_type = TYPE_PATTERN[(idx + 1) % len(TYPE_PATTERN)]
 
-        # 카테고리: 매번 다음 카테고리로 회전
-        cat_ids = [c["id"] for c in cats]
-        cur_idx = cat_ids.index(cur_cat_id) if cur_cat_id in cat_ids else -1
-        cur_cat_id = cat_ids[(cur_idx + 1) % len(cat_ids)]
+        if cur_cat_id in cat_ids_all:
+            cur_idx = cat_ids_all.index(cur_cat_id)
+            cur_cat_id = cat_ids_all[(cur_idx + 1) % len(cat_ids_all)]
+        else:
+            cur_cat_id = cat_ids_all[0]
 
 if __name__ == "__main__":
     main()
