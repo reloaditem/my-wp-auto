@@ -22,7 +22,8 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
 
 # 썸네일 배경으로 쓸 WP 미디어 ID (너가 준 332)
-THUMB_BG_MEDIA_ID = int(os.environ.get("THUMB_BG_MEDIA_ID", "332"))
+thumb_env = os.environ.get("THUMBNAIL_BASE_MEDIA_ID")
+THUMBNAIL_BASE_MEDIA_ID = int(thumb_env) if thumb_env and thumb_env.strip() else 332
 
 # 썸네일/브랜딩 텍스트
 SITE_BRAND = os.environ.get("SITE_BRAND", "ReloadItem.com")
@@ -402,10 +403,10 @@ def main():
     cats = wp_get_categories()
     cat_map = {c["id"]: c.get("name", "") for c in cats}
 
-    bg_url = wp_get_media_source_url(THUMB_BG_MEDIA_ID)
+    bg_url = wp_get_media_source_url(THUMBNAIL_BASE_MEDIA_ID)
     bg_bytes = download_bytes(bg_url) if bg_url else None
     if not bg_bytes:
-        raise SystemExit("Could not download thumbnail background. Check THUMB_BG_MEDIA_ID")
+        raise SystemExit("Could not download thumbnail background. Check THUMBNAIL_BASE_MEDIA_ID")
 
     for status in ["publish", "future"]:
         all_posts = get_all_posts(status)
