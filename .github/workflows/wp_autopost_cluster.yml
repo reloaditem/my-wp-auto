@@ -30,7 +30,7 @@ jobs:
           WP_PASS: ${{ secrets.WP_PASS }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-          THUMB_BG_MEDIA_ID: ${{ secrets.THUMB_BG_MEDIA_ID }}
+          THUMBNAIL_BASE_MEDIAID: ${{ secrets.THUMBNAIL_BASE_MEDIAID }}
           SITE_BRAND: ${{ secrets.SITE_BRAND }}
           HEADER_TEXT: ${{ secrets.HEADER_TEXT }}
           PUBLISH_HOUR_KST: "10"
