@@ -185,19 +185,41 @@ def unsplash_search(query: str) -> Optional[str]:
     except Exception:
         return None
 
-def strip_pricing(text: str) -> str:
+def strip_pricing(html_text: str) -> str:
     if not REMOVE_PRICING:
-        return text
-    lines = text.splitlines()
-    out = []
-    price_pat = re.compile(r"(\$\s?\d+|\d+\s?\/\s?mo|\bper\s+month\b|\bmonthly\b|\bPricing\b:)", re.I)
-    for ln in lines:
-        if price_pat.search(ln):
-            continue
-        out.append(ln)
-    text2 = "\n".join(out)
-    text2 = re.sub(r"\$\s?\d+(\.\d+)?", "", text2)
-    return text2
+        return html_text
+
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    # 1) 가격 문자열 자체는 치환(삭제) — 본문은 유지
+    #    (PartnerStack 민감 요소 제거 목적)
+    for node in soup.find_all(string=True):
+        s = str(node)
+        s2 = re.sub(r"\$\s?\d+(\.\d+)?", "", s)                 # $99, $99.9 제거
+        s2 = re.sub(r"\b\d+\s*/\s*mo\b", "", s2, flags=re.I)    # 19/mo 제거
+        s2 = re.sub(r"\bper\s+month\b", "", s2, flags=re.I)     # per month 제거
+        s2 = re.sub(r"\bmonthly\b", "", s2, flags=re.I)         # monthly 제거
+        if s2 != s:
+            node.replace_with(s2)
+
+    # 2) “Pricing:” 같은 가격 섹션 문단만 제거(전체 삭제 X)
+    #    너무 공격적으로 지우면 본문 망가져서, '가격 섹션'으로 보이는 것만 제거
+    pricing_pat = re.compile(r"\b(pricing\s*:|price\s*:|billing\s*:)\b", re.I)
+
+    # p/li/figcaption 등 텍스트 블록에서 pricing_pat 잡히면 그 블록만 제거
+    for tag in soup.find_all(["p", "li", "figcaption", "blockquote"]):
+        txt = tag.get_text(" ", strip=True)
+        if pricing_pat.search(txt):
+            tag.decompose()
+
+    # 3) 표(table)에서 가격 패턴이 강하게 보이는 row만 제거
+    row_pat = re.compile(r"(\$\s?\d+|\bper\s+month\b|\bmonthly\b|\b\/\s*mo\b)", re.I)
+    for tr in soup.find_all("tr"):
+        txt = tr.get_text(" ", strip=True)
+        if row_pat.search(txt):
+            tr.decompose()
+
+    return str(soup)
 
 def add_table_wrappers(html_text: str) -> str:
     soup = BeautifulSoup(html_text, "html.parser")
