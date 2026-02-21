@@ -20,7 +20,8 @@ WP_PASS = os.environ.get("WP_PASS", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")
 
-THUMB_BG_MEDIA_ID = int(os.environ.get("THUMB_BG_MEDIA_ID", "332"))
+thumb_env = os.environ.get("THUMBNAIL_BASE_MEDIA_ID")
+THUMBNAIL_BASE_MEDIA_ID = int(thumb_env) if thumb_env and thumb_env.strip() else 332
 SITE_BRAND = os.environ.get("SITE_BRAND", "ReloadItem.com")
 HEADER_TEXT = os.environ.get("HEADER_TEXT", "AI Tools · 2026")
 
@@ -450,10 +451,10 @@ def main():
     recent = wp_get_recent_posts(limit=40)
 
     # 썸네일 배경 다운로드
-    bg_url = wp_get_media_source_url(THUMB_BG_MEDIA_ID)
+    bg_url = wp_get_media_source_url(THUMBNAIL_BASE_MEDIAID)
     bg_bytes = download_bytes(bg_url) if bg_url else None
     if not bg_bytes:
-        raise SystemExit("Could not download thumbnail background. Check THUMB_BG_MEDIA_ID")
+        raise SystemExit("Could not download thumbnail background. Check THUMBNAIL_BASE_MEDIAID")
 
     now_kst = datetime.now(tz=KST)
     slots = upcoming_slots(now_kst)
