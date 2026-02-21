@@ -286,6 +286,13 @@ def main():
         thumb_bytes = make_featured_image(bg_bytes, html_mod.unescape(title), cat_name)
         media_id = upload_media(thumb_bytes, f"thumb_{pid}.jpg")
 
+        # 본문이 너무 짧아지면(실수로 삭제) 업데이트하지 않게 방어
+        plain = BeautifulSoup(new_content, "html.parser").get_text(" ", strip=True)
+        if len(plain) < 200:   # 200자 이하면 위험으로 간주
+        print(f"SKIP content overwrite (too short) post {pid}")
+        payload = {"featured_media": media_id}
+        else:
+    payload = {"content": new_content, "featured_media": media_id}
         payload = {
             "content": new_content,
             "featured_media": media_id,
