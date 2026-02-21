@@ -3,15 +3,15 @@ name: cluster_autopost
 on:
   workflow_dispatch:
   schedule:
-    # KST 02:10 = UTC 17:10 (전날)
-    # 주 2회: 수/토 새벽에 돌려서 3개씩 예약 쌓기
-    - cron: "10 17 * * 2,5"   # Tue,Fri UTC => Wed,Sat KST
+    # 매일 01:00 UTC = KST 10:00
+    - cron: "0 1 * * *"
 
 jobs:
   cluster:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -28,18 +28,15 @@ jobs:
           WP_BASE: ${{ secrets.WP_BASE }}
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASS: ${{ secrets.WP_PASS }}
-
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-
-          THUMB_BG_MEDIA_ID: "332"
-          SITE_BRAND: "ReloadItem"
-
+          THUMB_BG_MEDIA_ID: ${{ secrets.THUMB_BG_MEDIA_ID }}
+          SITE_BRAND: ${{ secrets.SITE_BRAND }}
+          HEADER_TEXT: ${{ secrets.HEADER_TEXT }}
           PUBLISH_HOUR_KST: "10"
-          PUBLISH_MIN_KST: "0"
-          POSTS_PER_RUN: "3"
-
-          REMOVE_PRICING: "1"
-          RANDOM_CATEGORY: "1"
+          SLOTS_AHEAD_DAYS: "6"
+          POSTS_PER_DAY: "1"
+          SKIP_WEEKDAY: "6"   # 6=일요일 스킵. 원하면 6을 지우거나 7처럼 쓰지 말고 0~6만.
+          BODY_IMAGE_COUNT: "3"
         run: |
           python scripts/wp_autopost_cluster.py
