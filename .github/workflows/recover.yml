@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout main (force)
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
@@ -17,14 +17,8 @@ jobs:
       - name: Debug list scripts
         run: |
           echo "PWD=$(pwd)"
-          echo "REF=$GITHUB_REF"
-          echo "SHA=$GITHUB_SHA"
           ls -al
           ls -al scripts
-          echo "Recover scripts:"
-          ls -al scripts | grep recover || true
-          echo "Find recover files:"
-          find scripts -maxdepth 1 -type f -name "recover*.py" -print
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,7 +30,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 openai
 
-      - name: Run recovery (DRY RUN)
+      - name: Run recovery (APPLY)
         env:
           WP_BASE: ${{ secrets.WP_BASE }}
           WP_USER: ${{ secrets.WP_USER }}
@@ -47,16 +41,14 @@ jobs:
           MIN_WORDS: "500"
           AFTER_DATE_KST: "2026-02-12"
         run: |
-          # 파일명이 1글자라도 다르면 터지니까, recover 스크립트를 "자동 선택"해서 실행
-          SCRIPT="$(ls -1 scripts/recover_regenerate_with_backup_since_*.py | head -n 1)"
+          SCRIPT=$(ls -1 scripts/recover_regenerate_with_backup_since_*.py | head -n 1)
           echo "Running: $SCRIPT"
           python "$SCRIPT"
-   
-       
-       - name: Upload backups artifact
-         if: always()
-         uses: actions/upload-artifact@v4
-         with:
-           name: wp-backups
-           path: backups/
-           if-no-files-found: ignore
+
+      - name: Upload backups artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wp-backups
+          path: backups/
+          if-no-files-found: ignore
