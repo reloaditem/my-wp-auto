@@ -1,15 +1,35 @@
 name: Recover Broken Posts
 
 on:
-  workflow_dispatch:   # 수동 실행 버튼
+  workflow_dispatch:
 
 jobs:
   recover:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ github.workspace }}
 
     steps:
-      - name: Checkout
+      - name: Checkout (force current ref)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Debug workspace
+        run: |
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          echo "PWD=$(pwd)"
+          echo "REF=$GITHUB_REF"
+          echo "SHA=$GITHUB_SHA"
+          ls -al
+          ls -al scripts || true
+
+      - name: Assert script exists
+        run: |
+          test -f scripts/recover_regenerate_with_backup_since_2026-02-12.py
+          echo "OK: script exists"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -18,9 +38,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install requests beautifulsoup4 openai
 
-      - name: Run recovery (DRY RUN first)
+      - name: Run recovery (DRY RUN)
         env:
           WP_BASE: ${{ secrets.WP_BASE }}
           WP_USER: ${{ secrets.WP_USER }}
@@ -28,6 +49,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DRY_RUN: "1"
           MAX_FIX: "50"
+          MIN_WORDS: "500"
           AFTER_DATE_KST: "2026-02-12"
         run: |
           python scripts/recover_regenerate_with_backup_since_2026-02-12.py
